@@ -33,8 +33,13 @@ describe('prototype suite: authentication and sessions', () => {
 		);
 	});
 
-	it('native session_search denied and shell denied', async () => {
-		expect((await c.tool('romain', 'session_search', {})).status).toBe(404);
+	it('native session_search replaced by a scoped search, and shell denied', async () => {
+		// The prototype refused Hermes' unscoped native search; here the search exists but is scoped
+		const search = await c.tool<{ sessions: unknown[] }>('romain', 'session_search', {
+			query: 'anything'
+		});
+		expect(search.status).toBe(200);
+		expect(search.body.sessions).toEqual([]);
 		expect((await c.tool('romain', 'terminal', {})).status).toBe(404);
 	});
 
