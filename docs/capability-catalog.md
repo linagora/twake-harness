@@ -153,11 +153,11 @@ Two things must exist before the first contract of a new application is deployed
 Order and traps:
 
 - Apply APISIX before the new contracts image, or with it. The harness sees new tools as soon as the image publishes them, and without their routes they would answer 404.
-- APISIX caches the OpenAPI document for an hour by address. Change its `?image=` query with every image digest so that the new document is fetched.
+- APISIX caches the OpenAPI document for an hour by address. Give it a new address with every image digest, as `?image=<digest>`, and with every change of `PUBLISHED_APPS`, so that the new document is fetched.
 - Tokens cached by the broker get a new audience only at their next refresh. Restart the broker to apply it at once.
 - The contracts service restricts only its ingress; check that the application accepts traffic from the contracts service's namespace.
 
-Switching an application off: removing its entries from the `apisix-contracts` values cuts it at the gateway, but the model keeps seeing its tools, which then fail, until the contracts image stops publishing them. A setting of the contracts service that lists the applications it publishes, kept equal to the APISIX values, would make both move together.
+Switching an application off: the contracts service publishes only the applications that its [`PUBLISHED_APPS`](https://github.com/linagora/twake-space-agent-contracts/blob/2cdcd134b3dd335608cd70bfde777566929c95fa/README.md#applications) setting names, `events` and `calendar` when it is unset or empty, and `events`, the assistant's own feed, whatever it says. It serves and describes their contracts alone, in `x-twake-domains` too, and the paths of any other application answer 404 like a path it never had; a name it does not know stops it from starting. The settings of Mail, Drive, Tasks and Chat, such as `MAIL_URL`, are required once `PUBLISHED_APPS` names their application, and only then. Kept equal to the applications APISIX routes, the setting makes the gateway and the tools move together: take the application out of `PUBLISHED_APPS`, so that its paths answer 404 once the new pods serve, give the OpenAPI document a new address, and its tools leave the agents when the harness next reads the document, within minutes; then remove its routes.
 
 The `apisix-contracts` values, grouped per application as decided. The applier needs to learn `apps` and `risk`; today it takes a flat `contracts` map:
 
