@@ -139,8 +139,8 @@ Either question names the application and says what its level, reading or writin
 				"fr": "lister, chercher et lire tes mails"
 			},
 			"write": {
-				"en": "move, archive and delete your mail",
-				"fr": "déplacer, archiver et supprimer tes mails"
+				"en": "prepare replies to your mail as drafts, which you send yourself, and move your mail between your folders, archive it or put it in the trash",
+				"fr": "préparer des réponses à tes mails en brouillons, que tu envoies toi-même, et déplacer tes mails d'un dossier à l'autre, les archiver ou les mettre à la corbeille"
 			}
 		}
 	}
