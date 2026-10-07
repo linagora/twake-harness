@@ -2,7 +2,7 @@
 
 What the assistants may do for their owner in each Twake application, as contracts behind APISIX, and what it takes to open each application to them.
 
-Status: proposal. Researched on 2026-10-06 against the versions deployed on dev, from their source code and their configuration. Only the three Calendar contracts marked `existing` are implemented, in [twake-space-agent-contracts](https://github.com/linagora/twake-space-agent-contracts/tree/3fce060).
+Status: proposal. Researched on 2026-10-06 against the versions deployed on dev, from their source code and their configuration. The three Calendar contracts marked `existing` were implemented then, in [twake-space-agent-contracts](https://github.com/linagora/twake-space-agent-contracts/tree/3fce060). The P0 contracts of Mail, Drive and Tasks have been implemented since, in [twake-space-agent-contracts](https://github.com/linagora/twake-space-agent-contracts/tree/2cdcd13), and their sections describe them as they shipped.
 
 - [How a contract works](#how-a-contract-works)
 - [Decisions](#decisions)
