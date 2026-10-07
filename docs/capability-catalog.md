@@ -53,7 +53,7 @@ Taken on 2026-10-06 by the product owner, on the research below.
 | Event turns   | When an event needs a first use, such as an invitation that requires reading the calendar, the assistant asks with that context and resumes after the yes.                                                                                                                            |
 | Tools         | The model sees the tools of every deployed contract, and consent is checked when a tool is called. Past about 40 tools, the harness moves to one entry tool per application.                                                                                                          |
 | APISIX        | Contracts are declared per application, with the upstream and the OpenAPI address given once.                                                                                                                                                                                         |
-| Mail          | Moving, archiving and trashing are first-wave writes. Spam reports are a separate high-risk contract until TMail learns per user.                                                                                                                                                     |
+| Mail          | Moving, archiving and trashing are first-wave writes. Spam reports are a separate high-risk contract; their risk class is a product decision to revisit.                                                                                                                              |
 
 Defaults taken with them:
 
@@ -509,7 +509,7 @@ TMail does not accept the broker's token as is. That token's `aud` is `twake-spa
 - Revocation: TMail caches a validated token for 5 minutes, so a withdrawn consent takes effect within that delay, unless TMail receives a back-channel logout for the session [8].
 - No delivery status: there is no `EmailSubmission/get`, and bounces arrive in the inbox [10].
 - To check live: thread grouping on dev; whether the rspamd status headers are stored with each message (a spam score as a trust hint); the label name of `needs-action` in `Label/get`; the session's actual capabilities; `calculateTotal` support.
-- Product decisions: `send_draft` quotas; team mailboxes; replies to external invitations through TMail; per-user spam learning in TMail, which would make the spam tools low.
+- Product decisions: `send_draft` quotas; team mailboxes; replies to external invitations through TMail; the risk class of the spam reports, to revisit.
 
 #### Sources
 
