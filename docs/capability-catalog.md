@@ -91,6 +91,7 @@ Assistant: I am about to send:
 ### Rules
 
 - **Levels.** Read covers the `GET` contracts of a domain; write covers all the others. The domain is the first segment of the contract id: `calendar`, `mail`, `drive`, `tasks`, `chat`.
+- **Words.** The request names the application and says what the level covers there, in the words that the [contracts service](https://github.com/linagora/twake-space-agent-contracts/blob/2cdcd134b3dd335608cd70bfde777566929c95fa/README.md#applications) publishes for each application in its OpenAPI document (`x-twake-domains`), in English and in French. Since the harness records one consent per application and level, an application's write words cover every write of that application, and a new write there comes with words that name it.
 - **Who answers.** Only the owner, by a reaction on the request or an exact yes or no as the next message. Anything else leaves the request pending. A contract that writes as the owner in Chat never targets a room where an assistant is a member, so no contract can answer in the owner's place (see [Chat](#chat-twake-chat)).
 - **The frozen call.** When it asks, the harness stores the exact call (contract and arguments). After the yes, it runs that call, not a new one written by the model, and the turn goes on with its result.
 - **Event turns.** A turn that an event started asks with the event's context and resumes after the yes. It never writes without one.
