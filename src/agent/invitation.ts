@@ -79,6 +79,16 @@ function timeOf(
 		: { ok: true, time };
 }
 
+// The instant a start of the invitation names, read as its slot's is: null for one it cannot read
+export function instantOfStart(
+	start: string | null,
+	timezone: string | null,
+	defaultZone: string
+): Date | null {
+	const time = timeOf(start, timezone, defaultZone, 'start');
+	return time.ok ? new Date(time.time) : null;
+}
+
 // The invitation's own period, as read_freebusy takes it, or why it is not asked: the contract
 // refuses a time without offset, a period that ends before it starts and one over 31 days, so
 // none of those is ever sent, and no length is guessed for an event without an end

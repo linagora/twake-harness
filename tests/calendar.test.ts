@@ -461,10 +461,14 @@ describe('a new invitation in Calendar wakes the invitee’s assistant', () => {
 			id,
 			actor: 'e2e.organizer@dev.twake.lin-saas.com',
 			reason: 'invited',
+			// Each time written in words beside it, in the deployment's zone, as no read of Alice's
+			// calendar named her own
 			object: {
 				type: 'event',
 				start: '2026-10-06T17:00:00+02:00',
+				start_in_words: 'Tuesday, October 6, 2026, 15:00',
 				end: '2026-10-06T18:00:00+02:00',
+				end_in_words: 'Tuesday, October 6, 2026, 16:00',
 				organizer: 'e2e.organizer@dev.twake.lin-saas.com'
 			},
 			// What the organizer wrote: the title, and the UID and the zone too
@@ -508,6 +512,7 @@ describe('a new invitation in Calendar wakes the invitee’s assistant', () => {
 		expect(shown?.object).toEqual({
 			type: 'event',
 			start: '2026-10-06T15:00:00Z',
+			start_in_words: 'Tuesday, October 6, 2026, 15:00',
 			end: null,
 			organizer: 'dave@test.local'
 		});
@@ -569,7 +574,9 @@ describe('a new invitation in Calendar wakes the invitee’s assistant', () => {
 			tool: 'read_freebusy',
 			arguments: {
 				start: '2026-10-06T17:00:00+02:00',
+				start_in_words: 'Tuesday, October 6, 2026, 15:00',
 				end: '2026-10-06T18:00:00+02:00',
+				end_in_words: 'Tuesday, October 6, 2026, 16:00',
 				exclude: [uid]
 			},
 			result: { status: 200, body: FREE }
@@ -1024,7 +1031,9 @@ describe('a new invitation in Calendar wakes the invitee’s assistant', () => {
 		});
 		expect(checkIn(told)?.['arguments']).toEqual({
 			start: '2026-10-09T09:00:00+02:00',
+			start_in_words: 'Friday, October 9, 2026, 07:00',
 			end: '2026-10-09T10:30:00+02:00',
+			end_in_words: 'Friday, October 9, 2026, 08:30',
 			exclude: ['uid-duration']
 		});
 	});
@@ -1117,6 +1126,7 @@ describe('a new invitation in Calendar wakes the invitee’s assistant', () => {
 		expect(ofSeries?.object).toEqual({
 			type: 'event',
 			start: '2026-10-06T17:00:00+02:00',
+			start_in_words: 'Tuesday, October 6, 2026, 15:00',
 			end: null,
 			organizer: 'bob@test.local'
 		});
@@ -1127,10 +1137,12 @@ describe('a new invitation in Calendar wakes the invitee’s assistant', () => {
 		expect(ofOccurrence?.object).toEqual({
 			type: 'event',
 			start: '2026-10-13T18:00:00+02:00',
+			start_in_words: 'Tuesday, October 13, 2026, 16:00',
 			end: null,
 			organizer: 'bob@test.local',
 			// In its zone, as its times are: the RECURRENCE-ID as written goes into its id alone
-			occurrence: '2026-10-13T17:00:00+02:00'
+			occurrence: '2026-10-13T17:00:00+02:00',
+			occurrence_in_words: 'Tuesday, October 13, 2026, 15:00'
 		});
 	});
 
@@ -1148,6 +1160,8 @@ describe('a new invitation in Calendar wakes the invitee’s assistant', () => {
 		expect(shownIn(allDay)?.object).toEqual({
 			type: 'event',
 			start: '2026-10-06',
+			start_in_words: 'Tuesday, October 6, 2026',
+			// The day after its last, as iCalendar writes it: no day named
 			end: '2026-10-08',
 			organizer: 'bob@test.local'
 		});
@@ -1156,13 +1170,16 @@ describe('a new invitation in Calendar wakes the invitee’s assistant', () => {
 		// calendar named its own
 		expect(checkIn(allDay)?.['arguments']).toEqual({
 			start: '2026-10-06T00:00:00+00:00',
+			start_in_words: 'Tuesday, October 6, 2026, 00:00',
 			end: '2026-10-08T00:00:00+00:00',
+			end_in_words: 'Thursday, October 8, 2026, 00:00',
 			exclude: ['all-day']
 		});
 		const utc = await toldOfInvitation(idOf('utc'));
 		expect(shownIn(utc)?.object).toEqual({
 			type: 'event',
 			start: '2026-10-06T15:00:00Z',
+			start_in_words: 'Tuesday, October 6, 2026, 15:00',
 			end: null,
 			organizer: 'bob@test.local'
 		});

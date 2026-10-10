@@ -67,7 +67,7 @@ export interface TestHarness {
 export async function resetDatabase(db: Db): Promise<void> {
 	await runMigrations(db);
 	await db.sql.unsafe(
-		'truncate table principals, sessions, memory_entries, matrix_transactions, matrix_registered_users, assistants, creator_dialogs, jobs, assistant_rooms, skills, principal_index, usage_daily, usage_window, usage_window_global, matrix_user_storage, wakeups, assistant_escrow, assistant_cross_signing, assistant_provisioned, consents, pending_calls, owner_cross_signing, owner_device_notices, owner_words_received, owner_megolm_sessions, owner_settings, delegation_reminders, suggestion_settings, suggestion_mutes, suggestions, listening_journal, listened_sources, brief_delegation_waits'
+		'truncate table principals, sessions, memory_entries, matrix_transactions, matrix_registered_users, assistants, creator_dialogs, jobs, assistant_rooms, skills, principal_index, usage_daily, usage_window, usage_window_global, matrix_user_storage, wakeups, assistant_escrow, assistant_cross_signing, assistant_provisioned, consents, pending_calls, owner_cross_signing, owner_device_notices, owner_words_received, owner_megolm_sessions, owner_settings, delegation_reminders, suggestion_settings, suggestion_mutes, suggestions, listening_journal, listened_sources, brief_delegation_waits, held_activities'
 	);
 }
 
@@ -95,6 +95,8 @@ export async function startTestHarness(options: StartOptions = {}): Promise<Test
 		LLM_MODEL: 'qwen3.8',
 		CONTRACTS_REFRESH_MS: '0',
 		LOG_LEVEL: 'info',
+		// Quiet hours only where a test sets them: the others run at any hour of the system clock
+		QUIET_HOURS_DEFAULT: 'none',
 		...(options.env ?? {})
 	});
 	const db = makeDb(config.databaseUrl);

@@ -3,9 +3,14 @@
 export const SOURCES = ['calendar', 'tasks', 'mail', 'drive', 'chat'] as const;
 export type Source = (typeof SOURCES)[number];
 
-// The sources whose activities the harness takes today, which their owner may listen to or not, and
-// which their assistant listens to unless they said otherwise
-export const LISTENABLE: readonly Source[] = ['calendar', 'tasks'];
+// The sources their owner may have their assistant listen to or not: those whose activities the
+// harness takes today, and Mail and Drive, which publish none it takes, so that listening there only
+// has their brief read them
+export const LISTENABLE: readonly Source[] = ['calendar', 'tasks', 'mail', 'drive'];
+
+// The listenable sources their assistant listens to unless they said otherwise: Mail waits for their
+// yes to the question of their first brief, and Drive for their asking
+export const LISTENED_BY_DEFAULT: readonly Source[] = ['calendar', 'tasks'];
 
 // The source the calendar producer gave the invitations it published, which the harness gives
 // Calendar's notifications and keeps their wake-ups by
@@ -29,4 +34,16 @@ export function isListenable(value: string): value is Source {
 // The listenable source an activity was published under, or null for one nobody listens to
 export function sourceOfActivity(published: string): Source | null {
 	return PUBLISHED_AS.get(published) ?? null;
+}
+
+// Whether what a source publishes for its owner wakes their assistant while it listens there
+export function wakesAssistant(source: Source): boolean {
+	return [...PUBLISHED_AS.values()].includes(source);
+}
+
+// What the producers of the sources given publish their activities under
+export function publishedUnder(sources: readonly Source[]): string[] {
+	return [...PUBLISHED_AS]
+		.filter(([, source]) => sources.includes(source))
+		.map(([published]) => published);
 }

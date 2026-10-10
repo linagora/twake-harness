@@ -44,7 +44,7 @@ const PROPOSAL = {
 	content: '# Monday plan\nTasks first.'
 };
 
-// The zone a read of my calendar returned, which the harness keeps for me rather than for my
+// The zone a read of my calendar returned, which the harness keeps for me until I delete my
 // assistant
 const ZONE = 'Asia/Tokyo';
 
@@ -388,11 +388,18 @@ describe('deleting my assistant erases what the harness keeps of it', () => {
 		await r.client.waitForMessage(irisRoom, r.assistantId, (t) => t === UNVERIFIED_REPORT);
 	});
 
-	it('keeps the identity it holds of me, and the zone of my calendar', async () => {
+	it("keeps the identity it holds of me, and erases the zone of my calendar: the turns of my new assistant state the present in the deployment's", async () => {
 		expect((await r.h.api.get(ALICE, '/v1/assistants/me/owner-identity')).body['pinned']).toEqual(
 			pinned
 		);
-		expect(await myZone()).toBe(ZONE);
+		expect(await myZone()).toBeNull();
+		const turns = r.h.apisix.llm.calls.length;
+		await ask(irisRoom, 'What time is it?', (t) => t === 'Heard: What time is it?');
+		const prompt =
+			r.h.apisix.llm.calls.slice(turns).find((c) => lastUser(c.request) === 'What time is it?')
+				?.request.messages[0]?.content ?? '';
+		expect(prompt).toContain(`time zone ${r.h.config.timeZone}.`);
+		expect(prompt).not.toContain(ZONE);
 	});
 
 	it('wakes my new assistant for no event it already told me of, however often the event comes again', async () => {
@@ -734,6 +741,18 @@ describe('deleting my assistant once my day is spent', () => {
 		return room;
 	}
 
+	// The turns I started this minute, as admission counts them: past my turns per minute, ten by
+	// default, my turns are refused until the minute passes, or until I started none
+	async function rush(turns: number): Promise<void> {
+		await withPrincipal(r.h.db, { id: ALICE }, async (tx) => {
+			await tx.sql`delete from usage_window where owner = ${ALICE}`;
+			if (turns === 0) return;
+			await tx.sql`
+				insert into usage_window (owner, at, turns)
+				values (${ALICE}, date_trunc('second', now()), ${turns})`;
+		});
+	}
+
 	// The lines by which the turn workers deferred the turn of an event, so far
 	function deferrals(event: ActivityEvent): Record<string, unknown>[] {
 		return r.h
@@ -761,7 +780,9 @@ describe('deleting my assistant once my day is spent', () => {
 	});
 
 	it('never runs the turn of an event deferred before I deleted my assistant, even once the next one is back in the room the event was for', async () => {
-		// My day is spent: the turn of this assignment waits for the next one
+		// My minute is spent: the turn of this assignment waits for the next one. My day is spent
+		// too, which alone would keep the activity for my brief rather than wait.
+		await rush(10);
 		const deferred = activityEvent({ id: 'erasure-deferred', recipient: ALICE });
 		await activity.publish(deferred);
 		await until('the turn of the event was deferred', () => deferrals(deferred).length > 0);
@@ -789,8 +810,10 @@ describe('deleting my assistant once my day is spent', () => {
 		const last = deferrals(deferred).at(-1);
 		const due = Number(last?.['time']) + Number(last?.['retryInMs']) + 1000;
 		await until('the turn of the event is due again', () => Date.now() > due);
-		// The next day: the turn of the event would now be admitted, and spend the day before my words
+		// The next day, my minute past: the turn of the event would now be admitted, and spend the day
+		// before my words
 		clock.set('2026-10-09T09:00:00Z');
+		await rush(0);
 		r.h.startTurnWorkers();
 		expect(await answerIn(second, 'Still there?')).toBe('Heard: Still there?');
 		expect(turnCalls(r.h.apisix.llm.calls, deferred.id)).toHaveLength(0);

@@ -25,11 +25,23 @@ export interface BriefChoices {
 	readonly stopped: boolean;
 }
 
+// What an owner chose of their quiet hours, null where they kept the deployment's
+export interface QuietChoices {
+	// Their daily range, in minutes after midnight on their wall clock, on the quarter hour, which
+	// crosses midnight when it ends before it starts: both null or neither, the same minute for both
+	// when they have none
+	readonly start: number | null;
+	readonly end: number | null;
+	// Their whole quiet days, in the order of the week, none when empty
+	readonly days: readonly Weekday[] | null;
+}
+
 // An owner's settings: the zone of their calendar, null before a read of it named one, and what
-// they chose of their brief
+// they chose of their brief and of their quiet hours
 export interface OwnerSettings {
 	readonly timeZone: TimeZone | null;
 	readonly brief: BriefChoices;
+	readonly quiet: QuietChoices;
 }
 
 interface OwnerSettingsRow {
@@ -38,12 +50,15 @@ interface OwnerSettingsRow {
 	readonly brief_days: Weekday[] | null;
 	readonly brief_paused_until: string | null;
 	readonly brief_stopped: boolean;
+	readonly quiet_start: number | null;
+	readonly quiet_end: number | null;
+	readonly quiet_days: Weekday[] | null;
 }
 
 export async function findOwnerSettings(tx: Tx, owner: string): Promise<OwnerSettings> {
 	const rows = await tx.sql<OwnerSettingsRow[]>`
 		select time_zone, brief_time, brief_days, brief_paused_until::text as brief_paused_until,
-			brief_stopped
+			brief_stopped, quiet_start, quiet_end, quiet_days
 		from owner_settings where owner = ${owner}`;
 	const row = rows[0];
 	const zone = row?.time_zone ?? null;
@@ -55,8 +70,26 @@ export async function findOwnerSettings(tx: Tx, owner: string): Promise<OwnerSet
 			days: row?.brief_days ?? null,
 			pausedUntil: row?.brief_paused_until ?? null,
 			stopped: row?.brief_stopped ?? false
+		},
+		quiet: {
+			start: row?.quiet_start ?? null,
+			end: row?.quiet_end ?? null,
+			days: row?.quiet_days ?? null
 		}
 	};
+}
+
+// Keeps what an owner chose of their quiet hours, in place of what they chose before, the rest of
+// their settings kept
+export async function saveQuietChoices(tx: Tx, owner: string, quiet: QuietChoices): Promise<void> {
+	const days = quiet.days === null ? null : [...quiet.days];
+	await tx.sql`
+		insert into owner_settings (owner, quiet_start, quiet_end, quiet_days)
+		values (${owner}, ${quiet.start}, ${quiet.end}, ${days})
+		on conflict (owner) do update set
+			quiet_start = excluded.quiet_start,
+			quiet_end = excluded.quiet_end,
+			quiet_days = excluded.quiet_days`;
 }
 
 // Keeps what an owner chose of their brief, in place of what they chose before, their zone kept
@@ -84,4 +117,19 @@ export async function saveBriefMailsReadAt(tx: Tx, owner: string, at: Date): Pro
 	await tx.sql`
 		insert into owner_settings (owner, brief_mails_read_at) values (${owner}, ${at})
 		on conflict (owner) do update set brief_mails_read_at = excluded.brief_mails_read_at`;
+}
+
+// The instant an owner's last brief read the shares made to them; null until a brief did
+export async function findBriefSharesReadAt(tx: Tx, owner: string): Promise<Date | null> {
+	const rows = await tx.sql<{ brief_shares_read_at: Date | null }[]>`
+		select brief_shares_read_at from owner_settings where owner = ${owner}`;
+	return rows[0]?.brief_shares_read_at ?? null;
+}
+
+// Keeps the instant a brief read the shares made to an owner, in place of the one before, the rest
+// kept
+export async function saveBriefSharesReadAt(tx: Tx, owner: string, at: Date): Promise<void> {
+	await tx.sql`
+		insert into owner_settings (owner, brief_shares_read_at) values (${owner}, ${at})
+		on conflict (owner) do update set brief_shares_read_at = excluded.brief_shares_read_at`;
 }

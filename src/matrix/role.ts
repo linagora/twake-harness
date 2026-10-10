@@ -18,6 +18,7 @@ import { SYSTEM_CLOCK, type Clock } from '../agent/clock.js';
 import { fetchOwnerMessages, localeOf } from '../assistants/locale.js';
 import { requestNaming } from '../assistants/naming.js';
 import { readIdentity } from '../assistants/provisioning.js';
+import { noteOwnerSeen } from '../briefs/activity.js';
 import {
 	claimDialogQuestion,
 	claimProvisionedWelcome,
@@ -71,6 +72,7 @@ import { ensureOrgAgent, isOrgMember, orgAgentUserId, orgGreeting } from './org.
 import { makeOwnerDeviceGate, type CheckedEvent, type OwnerWords } from './owner-devices.js';
 import { makePushedAppservice, PUSH_DEADLINE_MS } from './pushes.js';
 import { isYesNoQuestion, markQuestion, type YesNoQuestion } from './questions.js';
+import { readersOf } from './receipts.js';
 import { makeAppserviceStorage } from './storage.js';
 import { makeSuggestionIntake } from '../suggestions/intake.js';
 import { listenerUserId, makeChannelListener } from '../suggestions/listener.js';
@@ -535,6 +537,36 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			'to-device received'
 		);
 	});
+
+	// The owner was seen in their assistant's room: a message of theirs there, or a read receipt.
+	// Only the instant the role received it is kept, and only for the room their brief goes to. A
+	// failure costs their brief a sighting of them, and their message nothing.
+	async function ownerSeen(owner: string, roomId: string): Promise<void> {
+		try {
+			await withPrincipal(db, { id: owner }, (tx) => noteOwnerSeen(tx, owner, roomId, clock.now()));
+		} catch (err: unknown) {
+			log.warn({ owner, roomId, err }, 'owner sighting not kept');
+		}
+	}
+
+	// The public read receipts Synapse pushes: the owner's in their assistant's room count as seeing
+	// them there, anyone else's, and any of another room, count for nothing
+	appservice.on(
+		'ephemeral.event',
+		guard(
+			'read receipt',
+			async (event: Record<string, unknown>) => {
+				const receipt = readersOf(event);
+				if (receipt === null) return;
+				const room = await assistantRoom(receipt.roomId);
+				if (room === null || room.owner === ORGANIZATION_PRINCIPAL) return;
+				const ownerUserId = matrixUserIdOfPrincipal(config, room.owner);
+				if (ownerUserId === null || !receipt.userIds.has(ownerUserId)) return;
+				await ownerSeen(room.owner, receipt.roomId);
+			},
+			(event: Record<string, unknown>) => ({ roomId: event['room_id'] })
+		)
+	);
 
 	// Synapse pushes no to-device message while it holds the role for down, as it does for a while
 	// once the role stopped, and its push of to-device messages (MSC2409) can skip a key share when
@@ -1494,6 +1526,13 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		}
 		const room = await assistantRoom(roomId);
 		if (room !== null) {
+			// Any message of its owner, with words or not, sees them there
+			if (
+				room.owner !== ORGANIZATION_PRINCIPAL &&
+				principalOfMatrixUser(config, sender) === room.owner
+			) {
+				await ownerSeen(room.owner, roomId);
+			}
 			if (text === null) return;
 			const eventId = raw.event_id ?? `${roomId}:${Date.now()}`;
 			let owner: string;

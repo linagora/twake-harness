@@ -1,5 +1,6 @@
 import type { FastifyBaseLogger } from 'fastify';
 
+import { refuseBriefQuestion } from '../briefs/questions.js';
 import { wordAnswer, type Answer, type AnswerKind } from '../consents/answers.js';
 import { lookUpAnswerable, refusalNoticeJob, resumeJob } from '../consents/answering.js';
 import type { ConsentMetrics } from '../consents/metrics.js';
@@ -116,7 +117,8 @@ export function makeConsentRequests(options: ConsentRequestsOptions): ConsentReq
 
 	// A yes approves the call at once, so that no later answer nor newer request undoes it, and
 	// queues the turn that runs it with the owner's turns. A no refuses it, and the harness says so
-	// itself, without the model.
+	// itself, without the model: a no to the question of the owner's first brief stops their brief,
+	// in the same transaction, and the harness says how to resume it.
 	async function decide(
 		room: RequestRoom,
 		request: FoundRequest,
@@ -132,15 +134,20 @@ export function makeConsentRequests(options: ConsentRequestsOptions): ConsentReq
 				db,
 				resumeJob({ owner, roomId, pendingCallId, through: 'chat', replyTo: answer.message })
 			));
-		const decided = await withPrincipal(db, { id: owner }, (tx) =>
-			decidePendingCall(
+		const { decided, briefStopped } = await withPrincipal(db, { id: owner }, async (tx) => {
+			const done = await decidePendingCall(
 				tx,
 				owner,
 				pendingCallId,
 				answer.says === 'yes' ? 'approved' : 'refused',
 				answer.eventId
-			)
-		);
+			);
+			return {
+				decided: done,
+				briefStopped:
+					done && answer.says === 'no' && (await refuseBriefQuestion(tx, owner, pendingCallId))
+			};
+		});
 		log.info(
 			{ roomId, owner, pendingCallId, answer: answer.says, via: answer.kind, decided },
 			'owner answered'
@@ -151,10 +158,8 @@ export function makeConsentRequests(options: ConsentRequestsOptions): ConsentReq
 		if (queued && decided) options.resumeQueued(room, answer.message);
 		if (answer.says === 'no' && decided) {
 			const messages = await fetchMessages(owner);
-			await enqueueJob(
-				db,
-				refusalNoticeJob(room.assistantUserId, roomId, pendingCallId, messages.consent.refused)
-			);
+			const text = briefStopped ? messages.brief.refused : messages.consent.refused;
+			await enqueueJob(db, refusalNoticeJob(room.assistantUserId, roomId, pendingCallId, text));
 		}
 	}
 

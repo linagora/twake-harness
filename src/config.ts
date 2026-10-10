@@ -2,6 +2,7 @@ import { z } from 'zod';
 
 import { findTimeZone, type TimeZone } from './agent/clock.js';
 import { LOCALES, type Locale } from './i18n/messages.js';
+import { parseQuietHours, type QuietHours } from './quiet/hours.js';
 import { TASK_ASSIGNED_EVENT_TYPE } from './wakeups/event-types.js';
 import { HOUR_MS } from './wakeups/retention.js';
 
@@ -79,6 +80,9 @@ export interface Config {
 		readonly userDailyTokens: number;
 		// The AI Gateway's own rate, respected before it refuses us
 		readonly globalPerMinute: number;
+		// The share of each user's daily tokens kept for their own words, from 0 to 1: the turns
+		// activities wake and the briefs may spend the rest
+		readonly chatReserve: number;
 	};
 	readonly contracts: {
 		// Under the APISIX address: where the curated OpenAPI is served, and an optional prefix for
@@ -150,6 +154,9 @@ export interface Config {
 	readonly brief: {
 		readonly enabled: boolean;
 	};
+	// The quiet hours of an owner who chose none, on the wall clock of their zone, during which their
+	// assistant posts nothing on its own: what reaches them then waits for their brief or their end
+	readonly quietHours: QuietHours;
 	// Calendar's fanout of the notifications it sends each invitee, which the worker role listens
 	// to when it is set, for the new invitations
 	readonly calendar: CalendarSource | null;
@@ -218,6 +225,9 @@ const envSchema = z.object({
 	ADMISSION_USER_PER_MINUTE: z.coerce.number().int().min(1).default(10),
 	ADMISSION_USER_DAILY_TOKENS: z.coerce.number().int().min(1).default(200_000),
 	ADMISSION_GLOBAL_PER_MINUTE: z.coerce.number().int().min(1).default(400),
+	// The share of each owner's day kept for their own words: the turns activities wake and the
+	// briefs may spend the rest
+	CHAT_RESERVE: z.coerce.number().min(0).max(1).default(0.5),
 	CONTRACTS_OPENAPI_PATH: z.string().min(1).default('contracts/openapi.json'),
 	CONTRACTS_BASE_PATH: z.string().default(''),
 	CONTRACTS_REFRESH_MS: z.coerce.number().int().min(0).default(300_000),
@@ -265,6 +275,8 @@ const envSchema = z.object({
 		.min(HOUR_MS)
 		.default(30 * 24 * HOUR_MS),
 	BRIEF_ENABLED: z.enum(['true', 'false']).default('false'),
+	// From eight in the evening to eight in the morning, and all weekend
+	QUIET_HOURS_DEFAULT: z.string().default('20:00-08:00 saturday sunday'),
 	GATEWAY_SHARED_SECRET: z.string().default(''),
 	ESCROW_ENABLED: z.enum(['true', 'false']).default('false'),
 	OPENBAO_PATH: z.string().min(1).default('openbao'),
@@ -423,6 +435,12 @@ export function loadConfig(env: Env): Config {
 			`invalid configuration: BRIEF_ENABLED needs WAKEUPS_RETENTION_MS of two days at least, ${BRIEF_MIN_RETENTION_MS}, so that no brief goes twice for one date`
 		);
 	}
+	const quietHours = parseQuietHours(values.QUIET_HOURS_DEFAULT);
+	if (quietHours === null) {
+		throw new Error(
+			`invalid configuration: QUIET_HOURS_DEFAULT ${JSON.stringify(values.QUIET_HOURS_DEFAULT)} is not quiet hours; give a range on the quarter hour and whole days, such as 20:00-08:00 saturday sunday, either alone, or none`
+		);
+	}
 	return {
 		role: values.HARNESS_ROLE,
 		host: values.HOST,
@@ -459,7 +477,8 @@ export function loadConfig(env: Env): Config {
 			userQueue: values.ADMISSION_USER_QUEUE,
 			userPerMinute: values.ADMISSION_USER_PER_MINUTE,
 			userDailyTokens: values.ADMISSION_USER_DAILY_TOKENS,
-			globalPerMinute: values.ADMISSION_GLOBAL_PER_MINUTE
+			globalPerMinute: values.ADMISSION_GLOBAL_PER_MINUTE,
+			chatReserve: values.CHAT_RESERVE
 		},
 		contracts: {
 			openapiPath: values.CONTRACTS_OPENAPI_PATH,
@@ -498,6 +517,7 @@ export function loadConfig(env: Env): Config {
 		activity: values.ACTIVITY_ENABLED === 'true' ? activitySource(values) : null,
 		wakeups: { perHour: values.WAKEUPS_PER_HOUR, retentionMs: values.WAKEUPS_RETENTION_MS },
 		brief: { enabled: values.BRIEF_ENABLED === 'true' },
+		quietHours,
 		calendar: values.CALENDAR_ENABLED === 'true' ? calendarSource(values) : null,
 		gateway: {
 			sharedSecret: values.GATEWAY_SHARED_SECRET.length > 0 ? values.GATEWAY_SHARED_SECRET : null

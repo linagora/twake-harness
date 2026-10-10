@@ -1,16 +1,38 @@
 import type { FastifyBaseLogger } from 'fastify';
 
 import type { Config } from '../config.js';
-import { withPrincipal, type Db } from '../db/client.js';
+import { withPrincipal, type Db, type Tx } from '../db/client.js';
+import { isQuietAt, quietHoursOf } from '../quiet/hours.js';
+import { findOwnerSettings } from '../settings/repository.js';
 import { dateIn, nextMidnightIn, type Clock } from './clock.js';
+import type { TurnOrigin } from './tools.js';
 
-export type RefusalReason = 'user_queue_full' | 'user_rate' | 'user_budget' | 'global_rate';
+export type RefusalReason =
+	'user_queue_full' | 'user_rate' | 'user_budget' | 'global_rate' | 'event_share';
 
 // Why admission refused a turn, and for a user whose day is spent, how long until the next one
 // starts and lifts the refusal
 export type Refusal =
 	| { readonly reason: 'user_budget'; readonly liftsInMs: number }
 	| { readonly reason: Exclude<RefusalReason, 'user_budget'> };
+
+// What a turn spends the owner's day on: their own words, or what their assistant does on its own,
+// a turn an activity woke, a suggestion or their brief
+export type SpendingOrigin = TurnOrigin | 'brief';
+
+// What spends the share of the day the owner's words leave: the turns activities woke and the
+// briefs. A suggestion, which no daily cap may cut, spends the day as the owner's words do.
+function spendsTheShare(origin: SpendingOrigin): boolean {
+	return origin === 'event' || origin === 'brief';
+}
+
+// A refusal only the next day lifts, for what the assistant does on its own: the owner's day is
+// spent, or the share of it their assistant may spend on its own is
+export type SpentReason = Extract<RefusalReason, 'user_budget' | 'event_share'>;
+
+export function spentForTheDay(reason: RefusalReason): reason is SpentReason {
+	return reason === 'user_budget' || reason === 'event_share';
+}
 
 export type AdmissionDecision =
 	{ readonly ok: true; release(): void } | { readonly ok: false; readonly refusal: Refusal };
@@ -22,8 +44,12 @@ export interface AdmissionSnapshot {
 }
 
 export interface Admission {
-	admit(principalId: string): Promise<AdmissionDecision>;
-	recordUsage(principalId: string, tokens: number): Promise<void>;
+	admit(principalId: string, origin: SpendingOrigin): Promise<AdmissionDecision>;
+	recordUsage(principalId: string, tokens: number, origin: SpendingOrigin): Promise<void>;
+	// True the first time it is asked on the owner's day out of their quiet hours, in the
+	// transaction given under their principal: their assistant tells them once a day that it spent
+	// its share
+	shareNoticeDue(tx: Tx, principalId: string): Promise<boolean>;
 	snapshot(): AdmissionSnapshot;
 }
 
@@ -43,6 +69,8 @@ export interface AdmissionDeps {
 // replica for the others, and the queue of a full replica is served one user at a time rather
 // than first come first served. The turns per minute and the daily tokens are counted in the
 // database, so they hold across replicas; the turns in flight and the queue are this replica's.
+// The turns activities wake and the briefs may spend the share of the day CHAT_RESERVE leaves
+// them, the rest being kept for the owner's own words, which may spend the whole day.
 export function makeAdmission(deps: AdmissionDeps): Admission {
 	const { config, db, log, clock } = deps;
 	const limits = config.admission;
@@ -54,7 +82,8 @@ export function makeAdmission(deps: AdmissionDeps): Admission {
 		user_queue_full: 0,
 		user_rate: 0,
 		user_budget: 0,
-		global_rate: 0
+		global_rate: 0,
+		event_share: 0
 	};
 
 	// The day a user's tokens count in, which starts at midnight in the deployment's zone,
@@ -63,14 +92,16 @@ export function makeAdmission(deps: AdmissionDeps): Admission {
 		return dateIn(clock.now(), config.timeZone);
 	}
 
-	async function tokensToday(principalId: string): Promise<number> {
+	// The tokens a user spent today, and those of them that spent the share of their assistant
+	async function tokensToday(principalId: string): Promise<{ total: number; share: number }> {
 		const rows = await withPrincipal(
 			db,
 			{ id: principalId },
-			(tx) => tx.sql<{ tokens: string }[]>`
-				select tokens from usage_daily where owner = ${principalId} and day = ${today()}`
+			(tx) => tx.sql<{ tokens: string; share: string }[]>`
+				select tokens, event_tokens + brief_tokens as share from usage_daily
+				where owner = ${principalId} and day = ${today()}`
 		);
-		return Number(rows[0]?.tokens ?? 0);
+		return { total: Number(rows[0]?.tokens ?? 0), share: Number(rows[0]?.share ?? 0) };
 	}
 
 	async function userTurnsLastMinute(principalId: string): Promise<number> {
@@ -137,15 +168,22 @@ export function makeAdmission(deps: AdmissionDeps): Admission {
 	}
 
 	return {
-		async admit(principalId) {
+		async admit(principalId, origin) {
 			if ((await userTurnsLastMinute(principalId)) >= limits.userPerMinute) {
 				return refuse(principalId, 'user_rate');
 			}
 			if ((await globalTurnsLastMinute()) >= limits.globalPerMinute) {
 				return refuse(principalId, 'global_rate');
 			}
-			if ((await tokensToday(principalId)) >= limits.userDailyTokens) {
+			const spent = await tokensToday(principalId);
+			if (spent.total >= limits.userDailyTokens) {
 				return refuse(principalId, 'user_budget');
+			}
+			if (
+				spendsTheShare(origin) &&
+				spent.share >= (1 - limits.chatReserve) * limits.userDailyTokens
+			) {
+				return refuse(principalId, 'event_share');
 			}
 			const busy = (running.get(principalId) ?? 0) + (waiting.get(principalId) ?? 0);
 			if (busy > limits.userQueue) return refuse(principalId, 'user_queue_full');
@@ -171,15 +209,32 @@ export function makeAdmission(deps: AdmissionDeps): Admission {
 				}
 			};
 		},
-		async recordUsage(principalId, tokens) {
+		async recordUsage(principalId, tokens, origin) {
 			if (tokens <= 0) return;
+			const of = (counted: SpendingOrigin): number => (origin === counted ? tokens : 0);
 			await withPrincipal(
 				db,
 				{ id: principalId },
 				(tx) => tx.sql`
-					insert into usage_daily (owner, day, tokens) values (${principalId}, ${today()}, ${tokens})
-					on conflict (owner, day) do update set tokens = usage_daily.tokens + excluded.tokens`
+					insert into usage_daily (owner, day, tokens, event_tokens, brief_tokens)
+					values (${principalId}, ${today()}, ${tokens}, ${of('event')}, ${of('brief')})
+					on conflict (owner, day) do update set
+						tokens = usage_daily.tokens + excluded.tokens,
+						event_tokens = usage_daily.event_tokens + excluded.event_tokens,
+						brief_tokens = usage_daily.brief_tokens + excluded.brief_tokens`
 			);
+		},
+		async shareNoticeDue(tx, principalId) {
+			// Never during the owner's quiet hours: the first refusal past them tells them
+			const { timeZone, quiet } = await findOwnerSettings(tx, principalId);
+			const hours = quietHoursOf(quiet, config.quietHours);
+			if (isQuietAt(hours, timeZone ?? config.timeZone, clock.now())) return false;
+			const rows = await tx.sql`
+				insert into usage_daily (owner, day, share_noticed) values (${principalId}, ${today()}, true)
+				on conflict (owner, day) do update set share_noticed = true
+				where usage_daily.share_noticed = false
+				returning 1`;
+			return rows.length > 0;
 		},
 		snapshot: () => ({ inflight, queued: queue.length, refused: { ...refused } })
 	};

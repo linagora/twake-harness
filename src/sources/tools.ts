@@ -19,7 +19,14 @@ import { withPrincipal } from '../db/client.js';
 import { getMessages } from '../i18n/messages.js';
 import { ORGANIZATION_PRINCIPAL } from '../principals/principal.js';
 import { listListened, saveListening } from './repository.js';
-import { isListenable, isSource, LISTENABLE, SOURCES, type Source } from './sources.js';
+import {
+	isListenable,
+	isSource,
+	LISTENABLE,
+	SOURCES,
+	wakesAssistant,
+	type Source
+} from './sources.js';
 
 export const LISTEN_TOOL = 'listen_to_source';
 export const STOP_LISTENING_TOOL = 'stop_listening_to_source';
@@ -94,9 +101,14 @@ export function makeListeningTools(deps: ListeningToolsDeps): Tool[] {
 		const locale = await fetchOwnerLocale(context.db, owner, config.locale);
 		const { name } = labelOf(deps.domains(), source, 'read', locale, config.locale);
 		const { sources } = getMessages(locale);
+		// What reaches them in an application that wakes no assistant, such as Mail or Drive, only their
+		// brief tells them of
+		const said = wakesAssistant(source)
+			? { on: sources.listening(name), off: sources.notListening(name) }
+			: { on: sources.listeningForBrief(name), off: sources.notListeningForBrief(name) };
 		return {
 			result: { success: true, source, listening },
-			final: listening ? sources.listening(name) : sources.notListening(name)
+			final: listening ? said.on : said.off
 		};
 	}
 
@@ -163,7 +175,7 @@ export function makeListeningTools(deps: ListeningToolsDeps): Tool[] {
 			function: {
 				name: LISTEN_TOOL,
 				description:
-					'Start listening to one of the user\'s applications when they ask you to, such as "listen to my calendar": what arrives for them there wakes you, and you tell them of it. Only calendar and tasks can be listened to for now. If they have not let you read that application yet, the harness asks them first, and listening starts on their yes.',
+					'Start listening to one of the user\'s applications when they ask you to, such as "listen to my calendar": what arrives for them there wakes you, and you tell them of it, but for their mail and their drive, which only their brief tells them of. Only calendar, tasks, mail and drive can be listened to for now. If they have not let you read that application yet, the harness asks them first, and listening starts on their yes.',
 				parameters: SOURCE_PARAMETERS
 			}
 		},
@@ -199,7 +211,7 @@ export function makeListeningTools(deps: ListeningToolsDeps): Tool[] {
 			function: {
 				name: STOP_LISTENING_TOOL,
 				description:
-					'Stop listening to one of the user\'s applications when they ask you to, such as "stop listening to my calendar": what arrives for them there no longer wakes you, and you can still read it when they ask. Only calendar and tasks can be turned off for now.',
+					'Stop listening to one of the user\'s applications when they ask you to, such as "stop listening to my calendar": what arrives for them there no longer wakes you, nor does their brief tell them of it, and you can still read it when they ask. Only calendar, tasks, mail and drive can be turned off for now.',
 				parameters: SOURCE_PARAMETERS
 			}
 		},
@@ -220,7 +232,7 @@ export function makeListeningTools(deps: ListeningToolsDeps): Tool[] {
 			function: {
 				name: LISTENED_SOURCES_TOOL,
 				description:
-					"List the user's applications you listen to, whose activities wake you, those you could listen to but do not, and those you cannot listen to yet. Use it when they ask what you listen to or watch for them.",
+					"List the user's applications you listen to, which their brief tells them of and whose activities wake you, but for their mail's and their drive's, those you could listen to but do not, and those you cannot listen to yet. Use it when they ask what you listen to or watch for them.",
 				parameters: { type: 'object', properties: {}, additionalProperties: false }
 			}
 		},

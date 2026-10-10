@@ -1,4 +1,17 @@
+import { withPrincipal, type Db } from '../../src/db/client.js';
 import { CALENDAR_CATALOG, type ChatRequest } from './fake-apisix.js';
+
+// The owner reads their room every day, as far as their brief can tell, whatever day the test's
+// clock says: their brief never stops for want of them
+export async function seenEveryDay(db: Db, owner: string): Promise<void> {
+	await withPrincipal(
+		db,
+		{ id: owner },
+		(tx) => tx.sql`
+			insert into owner_settings (owner, owner_seen_at) values (${owner}, '2999-12-31T00:00:00Z')
+			on conflict (owner) do update set owner_seen_at = excluded.owner_seen_at`
+	);
+}
 
 // The paths the gateway receives the brief's reads at: the days of the owner's calendar, their
 // tasks, their mailboxes and the emails in them

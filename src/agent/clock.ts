@@ -87,8 +87,19 @@ export function midnightIn(instant: Date, timeZone: string): Date {
 
 // The instant the next day starts in the zone, at its midnight, daylight saving time included
 export function nextMidnightIn(instant: Date, timeZone: string): Date {
-	const today = Date.parse(`${dateIn(instant, timeZone)}T00:00:00Z`);
-	return startOfDayIn(new Date(today + 86_400_000).toISOString().slice(0, 10), timeZone);
+	return startOfDayIn(dayAfter(dateIn(instant, timeZone)), timeZone);
+}
+
+// The day after a day, both as dateIn gives them
+export function dayAfter(day: string): string {
+	return new Date(Date.parse(`${day}T00:00:00Z`) + 86_400_000).toISOString().slice(0, 10);
+}
+
+// The instant a time of a day of the zone names on its wall clock, daylight saving time included:
+// the day as dateIn gives it, and the time in minutes after midnight, under a day's
+export function instantIn(day: string, minutes: number, timeZone: string): Date {
+	const wall = `${day}T${timeOfDay(minutes)}:00`;
+	return new Date(wallTimeIn(wall, timeZone) ?? `${wall}Z`);
 }
 
 // The zone's offset at that instant, in minutes, daylight saving time included, whatever the
@@ -219,4 +230,14 @@ export function isCalendarDay(text: string): boolean {
 // A time of day in minutes after midnight, as a wall clock shows it: 07:30 for 450
 export function timeOfDay(minutes: number): string {
 	return `${pad(Math.floor(minutes / 60))}:${pad(minutes % 60)}`;
+}
+
+// A time of day as the model or a deployment writes it, 07:30, in minutes after midnight, when it
+// falls on the quarter hour; null otherwise
+export function quarterHourOf(time: string): number | null {
+	const match = /^(\d{1,2}):(\d{2})$/.exec(time.trim());
+	if (match === null) return null;
+	const hours = Number(match[1]);
+	const minutes = Number(match[2]);
+	return hours > 23 || minutes > 59 || minutes % 15 !== 0 ? null : hours * 60 + minutes;
 }

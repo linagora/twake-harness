@@ -38,17 +38,28 @@ const LISTEN = 'listen_to_source';
 const STOP = 'stop_listening_to_source';
 const LISTENED = 'listened_sources';
 
-// The calendar contracts, which name Calendar to its owners
+// The calendar contracts, which name Calendar and Mail to their owners
 const CATALOG = {
 	...CALENDAR_CATALOG,
-	'x-twake-domains': { calendar: { name: { en: 'Twake Calendar', fr: 'Twake Calendar' } } }
+	'x-twake-domains': {
+		calendar: { name: { en: 'Twake Calendar', fr: 'Twake Calendar' } },
+		mail: { name: { en: 'Twake Mail', fr: 'Twake Mail' } }
+	}
 };
 
-// What the harness says once Alice chose whether her assistant listens to her calendar
+// What the harness says once Alice chose whether her assistant listens to her calendar, and to her
+// mail, which only her brief reads
 const LISTENING_TO_CALENDAR =
 	'I am listening to Twake Calendar: I will let you know what arrives for you there.';
 const NOT_LISTENING_TO_CALENDAR =
 	'I am no longer listening to Twake Calendar: I will no longer let you know what arrives for you there, but I can still look at it when you ask me.';
+const LISTENING_TO_MAIL =
+	'I am listening to Twake Mail: your brief will tell you what arrives for you there.';
+const NOT_LISTENING_TO_MAIL =
+	'I am no longer listening to Twake Mail: your brief will no longer tell you what arrives for you there, but I can still look at it when you ask me.';
+
+// The applications Alice may have her assistant listen to
+const LISTENABLE = ['calendar', 'tasks', 'mail', 'drive'];
 
 // The line that tells the operator of an activity from a source the harness does not know
 const UNKNOWN_SOURCE = 'activity of an unknown source, listened to by nobody';
@@ -60,7 +71,7 @@ const ASKS: Readonly<Record<string, { readonly tool: string; readonly args: unkn
 	'Stop listening to my calendar': { tool: STOP, args: { source: 'calendar' } },
 	'Stop listening to my tasks': { tool: STOP, args: { source: 'tasks' } },
 	'Listen to my mail': { tool: LISTEN, args: { source: 'mail' } },
-	'Listen to my drive': { tool: LISTEN, args: { source: 'drive' } },
+	'Stop listening to my mail': { tool: STOP, args: { source: 'mail' } },
 	'Listen to my chat': { tool: LISTEN, args: { source: 'chat' } },
 	'Listen to my notes': { tool: LISTEN, args: { source: 'notes' } },
 	'What did you see today?': { tool: 'listening_journal', args: {} },
@@ -184,23 +195,21 @@ async function invite(uid: string): Promise<string> {
 }
 
 describe('what my assistant listens to, which I choose', () => {
-	it('listens to my calendar and my tasks unless I say otherwise, and to nothing else yet', async () => {
+	it('listens to my calendar and my tasks unless I say otherwise, to my mail and my drive only once I say so, and to nothing else yet', async () => {
 		expect(await told('What do you listen to?')).toEqual({
 			listened: ['calendar', 'tasks'],
-			not_listened: [],
-			not_yet_possible: ['mail', 'drive', 'chat']
+			not_listened: ['mail', 'drive'],
+			not_yet_possible: ['chat']
 		});
-		for (const source of ['mail', 'drive', 'chat']) {
-			expect(await told(`Listen to my ${source}`)).toEqual({
-				success: false,
-				error: 'not yet possible',
-				listenable: ['calendar', 'tasks']
-			});
-		}
+		expect(await told('Listen to my chat')).toEqual({
+			success: false,
+			error: 'not yet possible',
+			listenable: LISTENABLE
+		});
 		expect(await told('Listen to my notes')).toEqual({
 			success: false,
 			error: 'unknown source',
-			listenable: ['calendar', 'tasks']
+			listenable: LISTENABLE
 		});
 		// Nothing was asked, and no choice kept
 		expect(r.questions()).toHaveLength(0);
@@ -214,8 +223,8 @@ describe('what my assistant listens to, which I choose', () => {
 		);
 		expect(await told('What do you listen to?')).toEqual({
 			listened: ['tasks'],
-			not_listened: ['calendar'],
-			not_yet_possible: ['mail', 'drive', 'chat']
+			not_listened: ['calendar', 'mail', 'drive'],
+			not_yet_possible: ['chat']
 		});
 		const said = r.saying('').length;
 		const quiet = await invite('quiet-review');
@@ -320,5 +329,18 @@ describe('what my assistant listens to, which I choose', () => {
 			expect.objectContaining({ level: 40, source: 'twake://mail', eventId: mail.id, owner: ALICE })
 		]);
 		expect(turnCalls(r.h.apisix.llm.calls, mail.id)).toHaveLength(0);
+	});
+
+	it('listens to my mail from my yes to reading it there, for my brief alone, and stops when I say so', async () => {
+		const seen = r.questions().length;
+		await r.client.sendText(r.room, 'Listen to my mail');
+		await r.nextQuestion(seen);
+		expect(await answer('yes', 'I am listening')).toBe(LISTENING_TO_MAIL);
+		expect(await told('What do you listen to?')).toEqual({
+			listened: ['calendar', 'mail'],
+			not_listened: ['tasks', 'drive'],
+			not_yet_possible: ['chat']
+		});
+		expect(await answer('Stop listening to my mail', 'I am no longer')).toBe(NOT_LISTENING_TO_MAIL);
 	});
 });

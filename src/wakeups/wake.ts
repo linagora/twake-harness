@@ -1,16 +1,18 @@
 import type { FastifyBaseLogger } from 'fastify';
 
 import type { Clock } from '../agent/clock.js';
-import { carriesInvitation, type Invitation } from '../agent/invitation.js';
+import { carriesInvitation, instantOfStart, type Invitation } from '../agent/invitation.js';
 import type { TurnPayload } from '../agent/turn-worker.js';
 import { localeOf } from '../assistants/locale.js';
 import { findAssistant } from '../assistants/repository.js';
+import { briefSettingsOf } from '../briefs/settings.js';
 import type { Config } from '../config.js';
-import { withPrincipal, type Db } from '../db/client.js';
-import { getMessages, type Messages } from '../i18n/messages.js';
+import { withPrincipal, type Db, type Tx } from '../db/client.js';
+import { getMessages, type Locale, type Messages } from '../i18n/messages.js';
 import { enqueueJob } from '../jobs/queue.js';
 import {
 	noteActivity,
+	noteReleased,
 	NOTHING_SHOWN,
 	wasNoted,
 	type ActivityOutcome,
@@ -18,7 +20,10 @@ import {
 	type Shown
 } from '../journal/repository.js';
 import { fenced } from '../llm/data.js';
+import { isRecord } from '../matrix/json.js';
 import { matrixLocalpartOfPrincipal } from '../principals/identity.js';
+import { quietHoursOf } from '../quiet/hours.js';
+import { findOwnerSettings } from '../settings/repository.js';
 import { isListening } from '../sources/repository.js';
 import { sourceOfActivity } from '../sources/sources.js';
 import {
@@ -27,6 +32,14 @@ import {
 	MOVED_EVENT_TYPE,
 	TASK_ASSIGNED_EVENT_TYPE
 } from './event-types.js';
+import {
+	eraseHeldActivities,
+	hasReleasedActivities,
+	holdActivity,
+	listReleasedActivities,
+	quietExitOf,
+	type QuietExit
+} from './held.js';
 
 // Someone an event names, as its source knows them
 export interface Person {
@@ -64,7 +77,14 @@ export interface Wakeup {
 export const BRIEF_SOURCE = 'schedule';
 
 export type WakeOutcome =
-	'woken' | 'duplicate' | 'no_assistant' | 'ignored' | 'capped' | 'for_brief' | 'unlistened';
+	| 'woken'
+	| 'duplicate'
+	| 'no_assistant'
+	| 'ignored'
+	| 'capped'
+	| 'for_brief'
+	| 'quiet_hours'
+	| 'unlistened';
 
 export interface WakeDeps {
 	readonly config: Config;
@@ -116,6 +136,67 @@ function same(a: string | null, b: string | null): boolean {
 // Whether the recipient is the person whose action it was, by either identifier the source gives
 function isOwnAction({ actor, recipient }: Wakeup): boolean {
 	return same(actor.email, recipient.email) || same(actor.uuid, recipient.uuid);
+}
+
+// Whether the meeting an activity is about starts before an instant: at its time, at the one it
+// had for a move, or at the one a counter-proposal proposes, an all-day event at midnight in the
+// owner's zone. An activity about no meeting, or a time that cannot be read, never does.
+function startsBefore(wakeup: Wakeup, at: Date, timeZone: string): boolean {
+	if (!carriesInvitation(wakeup)) return false;
+	const { start, timezone } = wakeup.invitation;
+	const object = wakeup.shown.computed['object'];
+	const previous = isRecord(object) ? object['previous_start'] : undefined;
+	return [start, typeof previous === 'string' ? previous : null].some((time) => {
+		const instant = instantOfStart(time, timezone, timeZone);
+		return instant !== null && instant < at;
+	});
+}
+
+// When an activity that reaches its owner now comes out of their quiet hours, as they and their
+// brief stand, on the wall clock of their zone: null for one that does not wait, out of those hours
+// or about a meeting that starts before then
+async function heldUntil(
+	tx: Tx,
+	deps: WakeDeps,
+	owner: string,
+	wakeup: Wakeup
+): Promise<QuietExit | null> {
+	const { config, clock } = deps;
+	const settings = await findOwnerSettings(tx, owner);
+	const timeZone = settings.timeZone ?? config.timeZone;
+	const brief = config.brief.enabled ? briefSettingsOf(settings.brief, timeZone) : null;
+	const hours = quietHoursOf(settings.quiet, config.quietHours);
+	const exit = quietExitOf(hours, timeZone, brief, clock.now());
+	return exit === null || startsBefore(wakeup, exit.at, timeZone) ? null : exit;
+}
+
+// Queues the turn that tells an owner of a wake-up, in their room and their language, serialized
+// with their other turns, and keeps the wake-up with it, or neither
+async function queueTurn(
+	tx: Tx,
+	wakeup: Wakeup,
+	owner: string,
+	roomId: string,
+	locale: Locale
+): Promise<void> {
+	await tx.sql`
+		insert into wakeups (source, event_id, owner) values (${wakeup.source}, ${wakeup.id}, ${owner})`;
+	const key = `event:${JSON.stringify([wakeup.source, wakeup.id, owner])}`;
+	const payload: TurnPayload = {
+		owner,
+		roomId,
+		eventId: key,
+		text: told(wakeup, getMessages(locale)),
+		origin: wakeup.brief === undefined ? 'event' : 'brief',
+		event: {
+			id: wakeup.id,
+			type: wakeup.type,
+			source: wakeup.source,
+			...(wakeup.invitation === undefined ? {} : { invitation: wakeup.invitation })
+		},
+		...(wakeup.brief === undefined ? {} : { brief: wakeup.brief })
+	};
+	await enqueueJob(tx, { kind: 'turn', payload, dedupKey: key, groupKey: `turn:${owner}` });
 }
 
 // Wakes the assistant of the person a wake-up is for, its owner: a turn of origin event in their
@@ -190,32 +271,22 @@ export async function wake(
 			await noteAs('for_brief');
 			return 'for_brief' as const;
 		}
+		// Nor during their quiet hours, unless it is about a meeting that starts before they come out
+		// of them: it waits for their brief, or their end, with what its turn will need
+		const held = isActivity ? await heldUntil(tx, deps, owner, wakeup) : null;
+		if (held !== null) {
+			await holdActivity(tx, owner, wakeup, deps.clock.now(), held.releaseAt);
+			await noteAs('quiet_hours');
+			return 'quiet_hours' as const;
+		}
 		// Nor past their hourly cap: a burst of events, a mass assignment or what piled up during an
 		// outage, drowns neither their room nor their quota
 		if ((prior?.woken ?? 0) >= config.wakeups.perHour) {
 			if (isActivity) await noteAs('capped');
 			return 'capped' as const;
 		}
-		// Kept with the turn it queues, or not at all
-		await tx.sql`
-			insert into wakeups (source, event_id, owner) values (${wakeup.source}, ${wakeup.id}, ${owner})`;
 		if (isActivity) await noteAs('woken');
-		const key = `event:${JSON.stringify([wakeup.source, wakeup.id, owner])}`;
-		const payload: TurnPayload = {
-			owner,
-			roomId: assistant.roomId,
-			eventId: key,
-			text: told(wakeup, getMessages(localeOf(assistant, config.locale))),
-			origin: wakeup.brief === undefined ? 'event' : 'brief',
-			event: {
-				id: wakeup.id,
-				type: wakeup.type,
-				source: wakeup.source,
-				...(wakeup.invitation === undefined ? {} : { invitation: wakeup.invitation })
-			},
-			...(wakeup.brief === undefined ? {} : { brief: wakeup.brief })
-		};
-		await enqueueJob(tx, { kind: 'turn', payload, dedupKey: key, groupKey: `turn:${owner}` });
+		await queueTurn(tx, wakeup, owner, assistant.roomId, localeOf(assistant, config.locale));
 		return 'woken' as const;
 	});
 	const logged = { source: wakeup.source, eventId: wakeup.id, type: wakeup.type, owner };
@@ -226,10 +297,65 @@ export async function wake(
 	}
 	// Taken all the same, for no turn: nothing tells the owner of an event past their cap
 	if (outcome === 'capped' && options.logCapped !== false) deps.log.info(logged, 'event capped');
-	// What came of an activity, once settled: one capped or kept for the brief is, one woken once
-	// its turn ends
-	if ((outcome === 'capped' || outcome === 'for_brief') && isActivity) {
+	// What came of an activity, once settled: one capped, kept for the brief or held for the quiet
+	// hours is, one woken once its turn ends
+	if (
+		(outcome === 'capped' || outcome === 'for_brief' || outcome === 'quiet_hours') &&
+		isActivity
+	) {
 		deps.log.info({ ...logged, outcome }, 'activity noted');
 	}
 	return outcome;
+}
+
+// The brief its owner asks for in their turn takes the wake-up of its date, as a pass's would, so
+// that no pass wakes them for that date after it: under the lock of their wake-ups, as any of
+// theirs is taken, and counted among those of their hour. One a pass took first stays as it is.
+export async function takeBriefWakeup(tx: Tx, owner: string, id: string): Promise<void> {
+	await tx.sql`select pg_advisory_xact_lock(hashtext(${`wakeups:${owner}`}))`;
+	await tx.sql`
+		insert into wakeups (source, event_id, owner) values (${BRIEF_SOURCE}, ${id}, ${owner})
+		on conflict do nothing`;
+}
+
+// Wakes an owner's assistant for the activities their quiet hours held whose release came, the
+// first due first, within their hourly cap, the rest left for a later pass. Each comes out of the
+// hold, and wakes nobody whose assistant left its room or who no longer listens to its
+// application, whose journal keeps it as held. Gives how many it woke.
+export async function releaseHeld(deps: WakeDeps, owner: string): Promise<number> {
+	const { config, db, clock } = deps;
+	const now = clock.now();
+	const woken = await withPrincipal(db, { id: owner }, async (tx) => {
+		if (!(await hasReleasedActivities(tx, owner, now))) return [];
+		// One wake-up of an owner at a time, as wake() takes them
+		await tx.sql`select pg_advisory_xact_lock(hashtext(${`wakeups:${owner}`}))`;
+		const [prior] = await tx.sql<{ woken: number }[]>`
+			select count(*)::int as woken from wakeups
+			where owner = ${owner} and woken_at > now() - interval '1 hour'`;
+		const released = await listReleasedActivities(
+			tx,
+			owner,
+			now,
+			config.wakeups.perHour - (prior?.woken ?? 0)
+		);
+		const assistant = await findAssistant(tx, owner);
+		const queued: Wakeup[] = [];
+		for (const wakeup of released) {
+			await eraseHeldActivities(tx, owner, [{ source: wakeup.source, eventId: wakeup.id }]);
+			if (assistant === null || assistant.deletedAt !== null || assistant.roomId === null) continue;
+			const application = sourceOfActivity(wakeup.source);
+			if (application === null || !(await isListening(tx, owner, application))) continue;
+			await noteReleased(tx, owner, wakeup.source, wakeup.id);
+			await queueTurn(tx, wakeup, owner, assistant.roomId, localeOf(assistant, config.locale));
+			queued.push(wakeup);
+		}
+		return queued;
+	});
+	for (const wakeup of woken) {
+		deps.log.info(
+			{ source: wakeup.source, eventId: wakeup.id, type: wakeup.type, owner },
+			'event queued'
+		);
+	}
+	return woken.length;
 }

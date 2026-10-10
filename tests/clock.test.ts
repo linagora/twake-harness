@@ -69,7 +69,8 @@ function frenchNow(words: string, timeZone: string, iso: string): string {
 		'## Maintenant',
 		`Date et heure : ${words}, fuseau ${timeZone}.`,
 		`En ISO 8601 : ${iso}.`,
-		"Sers-t'en pour situer « aujourd'hui », « demain » ou « cet après-midi », et donne aux contrats des heures RFC 3339 avec ce décalage."
+		"Sers-t'en pour situer « aujourd'hui », « demain » ou « cet après-midi », et donne aux contrats des heures RFC 3339 avec ce décalage.",
+		"Chaque date qu'on te donne en données est écrite en toutes lettres à côté d'elle, jour de la semaine compris, sous une clé qui finit par _in_words : reprends ce jour plutôt que de le déduire de la date."
 	].join('\n');
 }
 

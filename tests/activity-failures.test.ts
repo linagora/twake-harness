@@ -239,7 +239,9 @@ describe('an event that fails holds back none of those after it, and is never lo
 			ACTIVITY_ENABLED: 'true',
 			ACTIVITY_AMQP_URL: amqpUrl,
 			RABBITMQ_PREFIX: PREFIX,
-			LOG_LEVEL: 'debug'
+			LOG_LEVEL: 'debug',
+			// Quiet hours only where a test sets them: this one runs at any hour of the system clock
+			QUIET_HOURS_DEFAULT: 'none'
 		});
 	}
 

@@ -8,11 +8,8 @@ import {
 } from '../assistants/repository.js';
 import { withPrincipal } from '../db/client.js';
 import { BRIEF_EVENT_TYPE } from '../wakeups/event-types.js';
-import { BRIEF_SOURCE, wake, type WakeDeps } from '../wakeups/wake.js';
-import { fetchBriefSettings, isBriefDate } from './settings.js';
-
-// How long after the time the owner chose a pass still sends their brief, in minutes: three hours
-const BRIEF_WINDOW_MINUTES = 3 * 60;
+import { BRIEF_SOURCE, releaseHeld, wake, type WakeDeps } from '../wakeups/wake.js';
+import { BRIEF_WINDOW_MINUTES, fetchBriefSettings, isBriefDate } from './settings.js';
 
 // What a scheduler knows of each owner's brief between its passes: the date it is done with, sent,
 // skipped, or not to send, at the time it was due then, which its next passes look no further at
@@ -83,9 +80,10 @@ async function briefOwner(deps: WakeDeps, owner: string, settled: SettledBriefs)
 	settled.set(owner, { date, time, capped: outcome === 'capped' });
 }
 
-// One pass over the owners whose assistant is in its room, one after the other: an owner whose
-// brief could not be looked at is skipped with a warning, and the pass goes on with the next one.
-// A pass told to stop stops before the next owner.
+// One pass over the owners whose assistant is in its room, one after the other: their brief, when
+// BRIEF_ENABLED is on, then what their quiet hours held that is due to wake them. An owner whose
+// brief could not be looked at, or what their quiet hours held, is skipped with a warning, and the
+// pass goes on with the next one. A pass told to stop stops before the next owner.
 export async function runBriefPass(
 	deps: WakeDeps,
 	settled: SettledBriefs = new Map(),
@@ -94,10 +92,17 @@ export async function runBriefPass(
 	const owners = [...new Set((await listActiveAssistants(deps.db)).map(({ owner }) => owner))];
 	for (const owner of owners.sort((a, b) => a.localeCompare(b))) {
 		if (stopping()) break;
+		if (deps.config.brief.enabled) {
+			try {
+				await briefOwner(deps, owner, settled);
+			} catch (err: unknown) {
+				deps.log.warn({ owner, err }, 'morning brief failed');
+			}
+		}
 		try {
-			await briefOwner(deps, owner, settled);
+			await releaseHeld(deps, owner);
 		} catch (err: unknown) {
-			deps.log.warn({ owner, err }, 'morning brief failed');
+			deps.log.warn({ owner, err }, 'quiet hours release failed');
 		}
 	}
 }
@@ -107,15 +112,14 @@ export interface BriefScheduler {
 	stop(): Promise<void>;
 }
 
-// Passes at once, then every checkMs, when BRIEF_ENABLED is on: each owner's brief goes out on the
+// Passes at once, then every checkMs. When BRIEF_ENABLED is on, each owner's brief goes out on the
 // days and from the time they chose, Monday to Friday from eight unless they chose others, on the
 // wall clock of their calendar's zone, the deployment's until a read of it named one. Kept by owner
 // and date, as any wake-up, a brief goes out once, whether a pass runs again after a restart or on
-// another replica.
+// another replica. On or off, what each owner's quiet hours held wakes their assistant once due.
 export function startBriefScheduler(deps: WakeDeps, checkMs: number): BriefScheduler {
 	if (!deps.config.brief.enabled) {
 		deps.log.info({ setting: 'BRIEF_ENABLED' }, 'morning briefs off');
-		return { stop: () => Promise.resolve() };
 	}
 	const settled: SettledBriefs = new Map();
 	let running: Promise<void> | null = null;

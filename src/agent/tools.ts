@@ -52,6 +52,14 @@ export interface ToolOutcome {
 	// That question in its parts, when the harness laid it out as a request about the call:
 	// `final` is its plain text
 	readonly request?: OwnerRequest;
+	// The brief the turn ends on, when `final` is the brief the owner asked for
+	readonly brief?: TurnBrief;
+}
+
+// A brief a turn ends on: the date it is of, and its HTML, which the harness laid out
+export interface TurnBrief {
+	readonly date: string;
+	readonly html: string;
 }
 
 // How a tool call ended, as the info logs report it: never the arguments or the result

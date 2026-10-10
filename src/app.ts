@@ -17,6 +17,7 @@ import { fetchOwnerMessages, localeOf } from './assistants/locale.js';
 import { requestNaming } from './assistants/naming.js';
 import { readIdentity, requestPreparation, requestRecovery } from './assistants/provisioning.js';
 import { findAssistant, setAssistantRoomId } from './assistants/repository.js';
+import { findBriefQuestion, refuseBriefQuestion } from './briefs/questions.js';
 import { makeAssistantService, type AssistantService } from './assistants/service.js';
 import { makeJwtAuthenticator, type Authenticator } from './auth/jwt.js';
 import type { Config } from './config.js';
@@ -278,17 +279,23 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 	}
 
 	// What the owner's assistant says in their room, in their language, once they refused a call
-	// asked there; nothing when the room is no longer the assistant's
+	// asked there: how to resume their brief, when it was the question of their first brief; nothing
+	// when the room is no longer the assistant's
 	async function refusalNotice(
 		principal: Principal,
 		roomId: string,
 		pendingCallId: string
 	): Promise<EnqueueInput | null> {
-		const assistant = await withPrincipal(db, principal, (tx) => findAssistant(tx, principal.id));
+		const { assistant, question } = await withPrincipal(db, principal, async (tx) => ({
+			assistant: await findAssistant(tx, principal.id),
+			question: await findBriefQuestion(tx, principal.id)
+		}));
 		if (assistant === null || assistant.deletedAt !== null || assistant.roomId !== roomId) {
 			return null;
 		}
-		const text = getMessages(localeOf(assistant, config.locale)).consent.refused;
+		const messages = getMessages(localeOf(assistant, config.locale));
+		const text =
+			question?.pendingCallId === pendingCallId ? messages.brief.refused : messages.consent.refused;
 		return refusalNoticeJob(assistant.userId, roomId, pendingCallId, text);
 	}
 
@@ -994,6 +1001,8 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 							await muteRoomFor(tx, principal.id, suggestion.roomId, NOT_USEFUL_MUTE_MS);
 						}
 						if (!(await answerPendingCall(tx, principal.id, id, 'refused', answerId))) return false;
+						// A no to the question of the owner's first brief stops their brief, as in the chat
+						await refuseBriefQuestion(tx, principal.id, id);
 						if (notice !== null) await enqueueJob(tx, notice);
 						// Another time is tried once: the second suggestion is not offered a third
 						if (

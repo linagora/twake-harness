@@ -9,6 +9,10 @@ const DEFAULT_TIME = 8 * 60;
 // The days it goes out unless they chose others: Monday to Friday
 const DEFAULT_DAYS: readonly Weekday[] = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'];
 
+// How long after the time the owner chose the scheduler still sends their brief, in minutes: three
+// hours
+export const BRIEF_WINDOW_MINUTES = 3 * 60;
+
 // An owner's brief as it stands, the defaults in place of what they did not choose, and the zone
 // of their calendar whose wall clock it follows, the deployment's until a read of it named one
 export interface BriefSettings {

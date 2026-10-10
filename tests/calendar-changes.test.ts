@@ -560,9 +560,13 @@ describe('a meeting I am invited to moves', () => {
 			object: {
 				type: 'event',
 				start: '2026-10-09T11:00:00+02:00',
+				start_in_words: 'Friday, October 9, 2026, 11:00',
 				end: '2026-10-09T12:00:00+02:00',
+				end_in_words: 'Friday, October 9, 2026, 12:00',
 				previous_start: '2026-10-09T09:00:00+02:00',
+				previous_start_in_words: 'Friday, October 9, 2026, 09:00',
 				previous_end: '2026-10-09T10:00:00+02:00',
+				previous_end_in_words: 'Friday, October 9, 2026, 10:00',
 				organizer: 'bob@test.local'
 			},
 			untrusted: { title: 'Budget review', uid, timezone: 'Europe/Paris' }
@@ -673,11 +677,16 @@ describe('a meeting I am invited to moves', () => {
 		expect(shownIn(toldOfOccurrence)?.object).toEqual({
 			type: 'event',
 			start: '2026-10-16T16:00:00+02:00',
+			start_in_words: 'Friday, October 16, 2026, 16:00',
 			end: '2026-10-16T17:00:00+02:00',
+			end_in_words: 'Friday, October 16, 2026, 17:00',
 			previous_start: '2026-10-16T14:00:00+02:00',
+			previous_start_in_words: 'Friday, October 16, 2026, 14:00',
 			previous_end: '2026-10-16T15:00:00+02:00',
+			previous_end_in_words: 'Friday, October 16, 2026, 15:00',
 			organizer: 'bob@test.local',
-			occurrence: '2026-10-16T14:00:00+02:00'
+			occurrence: '2026-10-16T14:00:00+02:00',
+			occurrence_in_words: 'Friday, October 16, 2026, 14:00'
 		});
 		// The answers cannot reach one occurrence apart from the rest of its series: the model is given
 		// no tool, and tells Alice she answers it in Calendar
@@ -752,9 +761,12 @@ describe('a meeting I am invited to moves', () => {
 				source: 'twake://calendar',
 				type: RENAMED,
 				received_at: expect.any(String),
+				received_at_in_words: expect.any(String),
 				outcome: 'for_brief',
 				start: '2026-10-09T11:00:00+02:00',
+				start_in_words: 'Friday, October 9, 2026, 11:00',
 				end: '2026-10-09T12:00:00+02:00',
+				end_in_words: 'Friday, October 9, 2026, 12:00',
 				untrusted: { uid, title: 'Budget review (final)' }
 			}
 		]);
@@ -888,7 +900,9 @@ describe('a meeting I am invited to is cancelled', () => {
 			object: {
 				type: 'event',
 				start: '2026-10-09T09:00:00+02:00',
+				start_in_words: 'Friday, October 9, 2026, 09:00',
 				end: '2026-10-09T10:00:00+02:00',
+				end_in_words: 'Friday, October 9, 2026, 10:00',
 				organizer: 'bob@test.local'
 			},
 			untrusted: { title: 'Budget review', uid, timezone: 'Europe/Paris' }
@@ -919,9 +933,12 @@ describe('a meeting I am invited to is cancelled', () => {
 		expect(shownIn(toldOfOccurrence)?.object).toEqual({
 			type: 'event',
 			start: '2026-10-23T14:00:00+02:00',
+			start_in_words: 'Friday, October 23, 2026, 14:00',
 			end: '2026-10-23T15:00:00+02:00',
+			end_in_words: 'Friday, October 23, 2026, 15:00',
 			organizer: 'bob@test.local',
-			occurrence: '2026-10-23T14:00:00+02:00'
+			occurrence: '2026-10-23T14:00:00+02:00',
+			occurrence_in_words: 'Friday, October 23, 2026, 14:00'
 		});
 		const ofSeries = producerId('weekly-review', ALICE, '2', 'CANCEL');
 		const toldOfSeries = lastUser((await toldOf(r.h.apisix, ofSeries, 1))[0]?.request);
@@ -1024,7 +1041,9 @@ describe('an invitee proposes another time for a meeting I organize', () => {
 			object: {
 				type: 'event',
 				proposed_start: '2026-10-12T14:00:00+02:00',
-				proposed_end: '2026-10-12T15:00:00+02:00'
+				proposed_start_in_words: 'Monday, October 12, 2026, 14:00',
+				proposed_end: '2026-10-12T15:00:00+02:00',
+				proposed_end_in_words: 'Monday, October 12, 2026, 15:00'
 			},
 			untrusted: { title: 'Roadmap review', uid, timezone: 'Europe/Paris' }
 		});
@@ -1136,9 +1155,12 @@ describe('an invitee answers a meeting I organize', () => {
 			source: 'twake://calendar',
 			type: REPLIED,
 			received_at: expect.any(String),
+			received_at_in_words: expect.any(String),
 			outcome: 'for_brief',
 			start: '2026-10-12T10:00:00+02:00',
+			start_in_words: 'Monday, October 12, 2026, 10:00',
 			end: '2026-10-12T11:00:00+02:00',
+			end_in_words: 'Monday, October 12, 2026, 11:00',
 			attendee,
 			answer: partstat,
 			untrusted: { uid, title: 'Roadmap review' }

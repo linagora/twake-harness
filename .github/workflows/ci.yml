@@ -33,10 +33,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Every suite runs with one api replica and with two sharing the database, on the
-        # Synapse of the platform; the latest release, there to see an upgrade coming, runs on
-        # main only, so a pull request costs half the runner time
-        replicas: [1, 2]
+        # On main, every suite runs with one api replica and with two sharing the database, on the
+        # Synapse of the platform and on its latest release, there to see an upgrade coming. A pull
+        # request runs one replica on the Synapse of the platform alone, a quarter of main's jobs
+        replicas: ${{ github.event_name == 'push' && fromJSON('[1, 2]') || fromJSON('[1]') }}
         synapse: ${{ github.event_name == 'push' && fromJSON('["ghcr.io/element-hq/synapse:v1.160.0", "ghcr.io/element-hq/synapse:latest"]') || fromJSON('["ghcr.io/element-hq/synapse:v1.160.0"]') }}
         # Each configuration runs as three jobs side by side, each with a third of the test files
         shard: [1, 2, 3]
@@ -115,14 +115,18 @@ jobs:
             helm template agent-$role charts/twake-harness --set role=$role --set config.matrixServerName=example.org --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set secretEnv.MATRIX_HS_TOKEN=h --set config.eventsClientIds=dispatcher > /tmp/events-$role.yaml
             if grep -q EVENTS_CLIENT_IDS /tmp/events-$role.yaml; then exit 1; fi
           done
-      # BRIEF_ENABLED is rendered on the worker role only, and only when config.briefEnabled is on
+      # BRIEF_ENABLED is rendered on the worker and api roles only, and only when config.briefEnabled is on
       - run: |
           helm template agent-worker charts/twake-harness --set role=worker --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k > /tmp/worker-default.yaml
           if grep -q BRIEF_ENABLED /tmp/worker-default.yaml; then exit 1; fi
           helm template agent-worker charts/twake-harness --set role=worker --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set config.briefEnabled=true > /tmp/worker-brief.yaml
           grep -A1 BRIEF_ENABLED /tmp/worker-brief.yaml | grep -q '"true"'
+          helm template agent-harness charts/twake-harness --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k > /tmp/api-default.yaml
+          if grep -q BRIEF_ENABLED /tmp/api-default.yaml; then exit 1; fi
           helm template agent-harness charts/twake-harness --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set config.briefEnabled=true > /tmp/api-brief.yaml
-          if grep -q BRIEF_ENABLED /tmp/api-brief.yaml; then exit 1; fi
+          grep -A1 BRIEF_ENABLED /tmp/api-brief.yaml | grep -q '"true"'
+          helm template agent-matrix charts/twake-harness --set role=matrix --set config.matrixServerName=example.org --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set secretEnv.MATRIX_HS_TOKEN=h --set config.briefEnabled=true > /tmp/matrix-brief.yaml
+          if grep -q BRIEF_ENABLED /tmp/matrix-brief.yaml; then exit 1; fi
       # TURN_MAX_TOOL_CALLS is rendered only when config.turnMaxToolCalls is set, as an integer
       - run: helm template agent-harness charts/twake-harness --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k > /tmp/default.yaml && ! grep -q TURN_MAX_TOOL_CALLS /tmp/default.yaml
       - run: |
@@ -142,14 +146,18 @@ jobs:
           helm template agent-matrix charts/twake-harness --set role=matrix --set config.matrixServerName=example.org --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set secretEnv.MATRIX_HS_TOKEN=h -f /tmp/status.yaml > /tmp/status-rendered.yaml
           grep -A1 TURN_STATUS_DELAY_MS /tmp/status-rendered.yaml | grep -q '"5000"'
       # ADMISSION_* are rendered only when their config.admission* value is set, and as integers:
-      # 0 counts, and a large value from a values file comes out whole instead of as 1e+06
-      - run: helm template agent-harness charts/twake-harness --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k > /tmp/default.yaml && ! grep -q ADMISSION_ /tmp/default.yaml
+      # 0 counts, and a large value from a values file comes out whole instead of as 1e+06.
+      # CHAT_RESERVE, a share, is rendered only when config.chatReserve is set, as given: 0 counts
+      - run: helm template agent-harness charts/twake-harness --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k > /tmp/default.yaml && ! grep -q ADMISSION_ /tmp/default.yaml && ! grep -q CHAT_RESERVE /tmp/default.yaml
       - run: |
-          printf 'config:\n  admissionUserDailyTokens: 1000000\n' > /tmp/quota.yaml
+          printf 'config:\n  admissionUserDailyTokens: 1000000\n  chatReserve: 0.75\n' > /tmp/quota.yaml
           helm template agent-harness charts/twake-harness --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k -f /tmp/quota.yaml --set config.admissionUserQueue=0 > /tmp/admission.yaml
           grep -A1 ADMISSION_USER_DAILY_TOKENS /tmp/admission.yaml | grep -q '"1000000"'
           grep -A1 ADMISSION_USER_QUEUE /tmp/admission.yaml | grep -q '"0"'
+          grep -A1 CHAT_RESERVE /tmp/admission.yaml | grep -q '"0.75"'
           kubeconform -strict -summary -kubernetes-version 1.31.0 /tmp/admission.yaml
+          helm template agent-harness charts/twake-harness --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set config.chatReserve=0 > /tmp/no-reserve.yaml
+          grep -A1 CHAT_RESERVE /tmp/no-reserve.yaml | grep -q '"0"'
       # OWNER_DEVICE_TRUST is rendered on the matrix role only, when config.ownerDeviceTrust is set,
       # and only as report or enforce: left out, the harness reports
       - run: helm template agent-matrix charts/twake-harness --set role=matrix --set persistence.enabled=true --set config.matrixServerName=example.org --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set secretEnv.MATRIX_HS_TOKEN=h > /tmp/matrix-default.yaml && ! grep -q OWNER_DEVICE_TRUST /tmp/matrix-default.yaml

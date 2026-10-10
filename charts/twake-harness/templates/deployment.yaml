@@ -125,6 +125,12 @@ spec:
               value: {{ $value | int64 | quote }}
             {{- end }}
             {{- end }}
+            {{- /* A share from 0 to 1, rendered as given, so 0 counts */}}
+            {{- $chatReserve := .Values.config.chatReserve }}
+            {{- if and (not (kindIs "invalid" $chatReserve)) (ne (toString $chatReserve) "") }}
+            - name: CHAT_RESERVE
+              value: {{ $chatReserve | toString | quote }}
+            {{- end }}
             {{- with .Values.config.turnHistoryMaxChars }}
             - name: TURN_HISTORY_MAX_CHARS
               value: {{ . | int64 | quote }}
@@ -222,11 +228,11 @@ spec:
             - name: DELEGATION_REMINDER_HOUR
               value: {{ $reminderHour | int64 | quote }}
             {{- end }}
-            {{- /* The worker role wakes the assistants for their owners' briefs, which the harness refuses with under two days of wake-ups kept */}}
-            {{- if .Values.config.briefEnabled }}
+            {{- end }}
+            {{- /* The worker role wakes the assistants for their owners' briefs, which the harness refuses with under two days of wake-ups kept, and the api role, which runs the owners' turns, gives them their brief when they ask for it */}}
+            {{- if and (has .Values.role (list "api" "worker")) .Values.config.briefEnabled }}
             - name: BRIEF_ENABLED
               value: "true"
-            {{- end }}
             {{- end }}
             {{- /* Every role that maps an owner's email to their Matrix id, or names an assistant, needs these */}}
             {{- with .Values.config.matrixServerName }}

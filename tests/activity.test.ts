@@ -192,6 +192,7 @@ describe('an assignment published on the activity exchange wakes the assignee’
 			source: 'twake://tasks',
 			id: event.id,
 			time: '2026-10-07T14:41:40.123456Z',
+			time_in_words: 'Wednesday, October 7, 2026, 14:41',
 			actor: 'bob@test.local',
 			reason: 'assigned',
 			object: {

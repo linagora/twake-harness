@@ -103,6 +103,8 @@ export async function startMatrixHarness(
 		// The status message of a slow turn has a suite of its own: elsewhere, whatever the speed of
 		// the runner, a turn answers with a message of its own as before
 		TURN_STATUS_DELAY_MS: '600000',
+		// Quiet hours only where a test sets them: the others run at any hour of the system clock
+		QUIET_HOURS_DEFAULT: 'none',
 		...(options.env ?? {})
 	};
 	const config = loadConfig(settings);

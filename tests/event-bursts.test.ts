@@ -47,9 +47,8 @@ function assignment(recipients: readonly Record<string, unknown>[] = [ALICE]): A
 	};
 }
 
-// What the assistant says when admission refuses a turn: too many at once, or its day spent
+// What the assistant says when admission refuses a turn for too many at once
 const TOO_MANY = 'I received too many messages at once';
-const DAY_SPENT = 'I have reached my limit for the day';
 
 function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
@@ -287,9 +286,10 @@ describe('an event turn admission refuses for too long', () => {
 	let l: Listening;
 	let worker: WorkerRole;
 	beforeAll(async () => {
-		// A day of one turn, and three seconds for an event's turn admission refused to start
+		// One turn a minute, and three seconds for an event's turn admission refused to start: a spent
+		// day would refuse it for good, and keep it for the brief
 		l = await startListening('late', {
-			ADMISSION_USER_DAILY_TOKENS: '1',
+			ADMISSION_USER_PER_MINUTE: '1',
 			TURN_EVENT_MAX_DELAY_MS: '3000'
 		});
 		worker = await l.listen();
@@ -303,17 +303,15 @@ describe('an event turn admission refuses for too long', () => {
 		const first = assignment();
 		await l.publish(first);
 		await l.answerTo(first);
-		// My day is spent: the next assignment's turn waits, then is given up
+		// My minute is spent: the next assignment's turn waits, then is given up
 		const second = assignment();
 		await l.publish(second);
 		const [abandoned] = await turnLines(l, 'event turn abandoned', second, 1);
-		expect(abandoned).toMatchObject({ reason: 'user_budget' });
+		expect(abandoned).toMatchObject({ reason: 'user_rate' });
 		// My own words are refused as before: the only ones I am told I asked too much for
 		await l.r.client.sendText(l.r.room, 'And now?');
-		await l.r.client.waitForMessage(l.r.room, l.r.assistantId, (text) =>
-			text.startsWith(DAY_SPENT)
-		);
-		expect(l.r.saying(DAY_SPENT)).toHaveLength(1);
+		await l.r.client.waitForMessage(l.r.room, l.r.assistantId, (text) => text.startsWith(TOO_MANY));
+		expect(l.r.saying(TOO_MANY)).toHaveLength(1);
 		expect(turnCalls(l.r.h.apisix.llm.calls, second.id)).toHaveLength(0);
 	});
 });

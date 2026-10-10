@@ -100,6 +100,7 @@ describe('contracts as tools', () => {
 				'listened_sources',
 				'listening_journal',
 				'memory',
+				'quiet_hours',
 				'set_language',
 				'scoped_sessions_list',
 				'scoped_sessions_read',

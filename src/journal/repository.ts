@@ -3,14 +3,27 @@ import { isRecord } from '../matrix/json.js';
 
 // What came of an activity a source published for an owner: woken until the turn it woke ends,
 // then suggested once that turn answered, nothing_useful once it ended on no words, abandoned once
-// it waited too long for admission, failed otherwise; capped when the owner's hourly cap held it
-// back, and for_brief when it called for no word at once, such as a task they assigned themselves,
-// both with no turn
+// it waited too long for admission, share_spent once admission refused it as the owner's day, or
+// the share of it their assistant spends on its own, was spent, failed otherwise; capped when the
+// owner's hourly cap held it back, and for_brief when it called for no word at once, such as a task
+// they assigned themselves, both with no turn; quiet_hours when it reached them during their quiet
+// hours, until it wakes them as they end, woken then, unless their brief names it first
 export type ActivityOutcome =
-	'woken' | 'suggested' | 'nothing_useful' | 'abandoned' | 'failed' | 'capped' | 'for_brief';
+	| 'woken'
+	| 'suggested'
+	| 'nothing_useful'
+	| 'abandoned'
+	| 'share_spent'
+	| 'failed'
+	| 'capped'
+	| 'for_brief'
+	| 'quiet_hours';
 
 // The outcomes the turn an activity woke ends on
-export type WokenTurnOutcome = Exclude<ActivityOutcome, 'woken' | 'capped' | 'for_brief'>;
+export type WokenTurnOutcome = Exclude<
+	ActivityOutcome,
+	'woken' | 'capped' | 'for_brief' | 'quiet_hours'
+>;
 
 // Something as the model is shown it: what its source computed, apart from what people wrote,
 // which is data, never instructions
@@ -62,6 +75,18 @@ function shownOf(value: unknown): Shown {
 	};
 }
 
+function activityOf(row: ActivityRow): Activity {
+	return {
+		source: row.source,
+		eventId: row.event_id,
+		type: row.type,
+		receivedAt: row.received_at,
+		outcome: row.outcome,
+		ids: shownOf(row.ids),
+		names: row.names === null ? null : shownOf(row.names)
+	};
+}
+
 // Notes an activity in its owner's journal, in the transaction given under their principal. The
 // owner joins the index of the principals, whose journal the worker role's purge walks.
 export async function noteActivity(
@@ -109,21 +134,70 @@ export async function settleActivity(
 	return rows.length > 0;
 }
 
+// Sets an activity the owner's quiet hours held as woken, once it wakes them as they end: the turn
+// it wakes settles what came of it
+export async function noteReleased(
+	tx: Tx,
+	owner: string,
+	source: string,
+	eventId: string
+): Promise<void> {
+	await tx.sql`
+		update listening_journal set outcome = 'woken'
+		where owner = ${owner} and source = ${source} and event_id = ${eventId}
+			and outcome = 'quiet_hours'`;
+}
+
 // The owner's activities received from a given instant on, in the order they arrived
 export async function listActivitiesSince(tx: Tx, owner: string, since: Date): Promise<Activity[]> {
 	const rows = await tx.sql<ActivityRow[]>`
 		select source, event_id, type, received_at, outcome, ids, names from listening_journal
 		where owner = ${owner} and received_at >= ${since}
 		order by received_at, source, event_id`;
-	return rows.map((row) => ({
-		source: row.source,
-		eventId: row.event_id,
-		type: row.type,
-		receivedAt: row.received_at,
-		outcome: row.outcome,
-		ids: shownOf(row.ids),
-		names: row.names === null ? null : shownOf(row.names)
-	}));
+	return rows.map(activityOf);
+}
+
+// What came of the activities that had no turn, which the owner's next brief names: those their
+// hourly cap held back, those that waited too long for admission or that admission refused once
+// their assistant's share of the day was spent, those kept for their brief, and those their quiet
+// hours hold
+const UNTOLD_OUTCOMES: readonly ActivityOutcome[] = [
+	'capped',
+	'abandoned',
+	'share_spent',
+	'for_brief',
+	'quiet_hours'
+];
+
+// The owner's activities published under the sources given that had no turn and that no brief named
+// yet, nor the purge erased the names of, in the order they arrived, the first ones given
+export async function listUntoldActivities(
+	tx: Tx,
+	owner: string,
+	sources: readonly string[],
+	limit: number
+): Promise<Activity[]> {
+	if (sources.length === 0) return [];
+	const rows = await tx.sql<ActivityRow[]>`
+		select source, event_id, type, received_at, outcome, ids, names from listening_journal
+		where owner = ${owner} and source in ${tx.sql([...sources])}
+			and outcome in ${tx.sql([...UNTOLD_OUTCOMES])} and names is not null
+		order by received_at, source, event_id
+		limit ${limit}`;
+	return rows.map(activityOf);
+}
+
+// Erases the names of the owner's activities a brief named, once it went out
+export async function eraseActivityNames(
+	tx: Tx,
+	owner: string,
+	activities: readonly Pick<Activity, 'source' | 'eventId'>[]
+): Promise<void> {
+	for (const { source, eventId } of activities) {
+		await tx.sql`
+			update listening_journal set names = null
+			where owner = ${owner} and source = ${source} and event_id = ${eventId}`;
+	}
 }
 
 // How many activities a purge erased the names of, and how many it deleted

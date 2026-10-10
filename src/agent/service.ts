@@ -2,6 +2,7 @@ import type { FastifyBaseLogger } from 'fastify';
 
 import { localeOf } from '../assistants/locale.js';
 import { findAssistant, holdAssistantInRoom } from '../assistants/repository.js';
+import { BRIEF_NOW_TOOL, makeBriefNowTool } from '../briefs/now.js';
 import { BRIEF_SETTINGS_TOOL, makeBriefSettingsTool } from '../briefs/tool.js';
 import type { Config } from '../config.js';
 import { makeContractCatalog, type ContractCatalog } from '../contracts/catalog.js';
@@ -23,6 +24,7 @@ import { LlmError, makeLlmClient, type LlmClient, type LlmMessage } from '../llm
 import { listMemory } from '../memory/repository.js';
 import { ORGANIZATION_PRINCIPAL, type Principal } from '../principals/principal.js';
 import { ensurePrincipal } from '../principals/repository.js';
+import { makeQuietHoursTool, QUIET_HOURS_TOOL } from '../quiet/tool.js';
 import {
 	createSession,
 	ensureRoomSession,
@@ -41,6 +43,7 @@ import {
 import { makeAdmission, type Admission, type Refusal } from './admission.js';
 import {
 	makeBriefRunner,
+	withBriefAskedFor,
 	type BriefInput,
 	type BriefResult,
 	type BriefResumeInput
@@ -77,6 +80,7 @@ import {
 	type ToolContext,
 	type ToolOutcome,
 	type ToolRegistry,
+	type TurnBrief,
 	type TurnOrigin,
 	WITHDRAW_OWN_CONSENTS,
 	withoutTools,
@@ -117,12 +121,15 @@ const WITHHELD_FROM_EVENT_TURNS: readonly string[] = [
 // whatever their rights: the owner's listening journal, which tells them in their own turns what
 // their assistant saw, and would show such a turn the text third parties wrote in every other
 // activity; the tools by which they choose what their assistant listens to, which a third party's
-// text never changes; and the settings of their morning brief, which only they move, pause or
-// stop. A suggestion's turn is offered its own two tools alone.
+// text never changes; the settings of their morning brief, which only they move, pause or stop;
+// their brief at once, which only they ask for; and their quiet hours, which only they set. A
+// suggestion's turn is offered its own two tools alone.
 const TOOLS_HIDDEN_FROM_EVENT_TURNS: readonly string[] = [
 	LISTENING_JOURNAL_TOOL,
 	...LISTENING_TOOLS,
-	BRIEF_SETTINGS_TOOL
+	BRIEF_SETTINGS_TOOL,
+	BRIEF_NOW_TOOL,
+	QUIET_HOURS_TOOL
 ];
 
 // The tools alone that a turn a meeting's change woke is given, by the type of that change and
@@ -282,6 +289,8 @@ export type OwnerTurnResult =
 			readonly pendingCallId?: string;
 			// That question in its parts, when the harness laid it out as a request about the call
 			readonly request?: OwnerRequest;
+			// The brief the owner asked for, when the turn ended on it
+			readonly brief?: TurnBrief;
 			// The turn reached one of its limits before it answered: there is more to do
 			readonly atLimit?: true;
 			// A turn an activity woke found nothing useful to say: its answer is empty, for nobody
@@ -380,7 +389,17 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 				consentMetrics,
 				domains: () => contracts.domainDescriptions
 			}),
-			makeBriefSettingsTool({ clock, timeZone: config.timeZone })
+			makeBriefSettingsTool({ clock, timeZone: config.timeZone }),
+			makeQuietHoursTool({
+				timeZone: config.timeZone,
+				locale: config.locale,
+				defaults: config.quietHours
+			}),
+			// The brief its owner asks for exists while the briefs are on alone, written as the
+			// scheduler's are, once the service is made
+			...(config.brief.enabled
+				? [makeBriefNowTool({ brief: (context) => briefs.inTurn(context) })]
+				: [])
 		],
 		() => contracts.tools
 	);
@@ -584,8 +603,9 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 
 	async function runOwnerTurn(input: OwnerTurnInput): Promise<OwnerTurnResult> {
 		const { principal } = input;
-		// Admitted before anything else runs; the slot is held until the turn ends
-		const decision = await admission.admit(principal.id);
+		// Admitted before anything else runs; the slot is held until the turn ends. A yes that resumes
+		// a call spends its owner's day as their words do, whatever turn froze the call.
+		const decision = await admission.admit(principal.id, input.origin ?? 'owner');
 		if (!decision.ok) return { kind: 'busy', ...decision.refusal };
 		try {
 			return await gate.run(principal.id, () => runAdmittedTurn(input));
@@ -831,14 +851,24 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 						limitNotice: (actions) => messages.notices.turnLimit(actions),
 						...(input.actionsDone === undefined ? {} : { actionsDone: input.actionsDone }),
 						mayStaySilent: woken,
-						today: dateIn(now, timeZone)
+						today: dateIn(now, timeZone),
+						timeZone,
+						locale
 					}
 				);
+				// A turn that ended on the brief its owner asked for takes what the earlier briefs named
+				// out of the conversation, as a newer brief does
 				const saved = await withPrincipal(db, principal, (tx) =>
-					saveSessionMessages(tx, session.id, turn.messages)
+					saveSessionMessages(
+						tx,
+						session.id,
+						turn.brief === undefined
+							? turn.messages
+							: withBriefAskedFor(turn.messages, history.length)
+					)
 				);
 				if (!saved) return { kind: 'missing' };
-				await admission.recordUsage(principal.id, turn.tokens);
+				await admission.recordUsage(principal.id, turn.tokens, input.origin ?? 'owner');
 				log.info({ answerLength: turn.answer.length, tokens: turn.tokens }, 'turn finished');
 				return {
 					kind: 'ok',
@@ -847,6 +877,7 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 					model: llm.model,
 					...(turn.pendingCallId === undefined ? {} : { pendingCallId: turn.pendingCallId }),
 					...(turn.request === undefined ? {} : { request: turn.request }),
+					...(turn.brief === undefined ? {} : { brief: turn.brief }),
 					...(turn.atLimit === true ? { atLimit: true } : {}),
 					...(turn.silent === true ? { silent: true } : {})
 				};
@@ -871,8 +902,8 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 		consentMetrics
 	});
 
-	// The brief of the owner's working day, which the worker role's scheduler asks for: the
-	// assistant speaks as in its owner's turns, given no tool
+	// The brief of the owner's working day, which the worker role's scheduler asks for, or the owner
+	// in their turn: the assistant speaks as in its owner's turns, given no tool
 	const briefs = makeBriefRunner({
 		config,
 		db,

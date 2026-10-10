@@ -104,7 +104,13 @@ describe('I ask my assistant what it may access, and take accesses back', () => 
 		await allow('Find the budget in my mail');
 		expect(await told('What may you access?')).toEqual({
 			consents: [
-				{ domain: 'mail', level: 'read', granted_by: 'chat', granted_at: expect.any(String) }
+				{
+					domain: 'mail',
+					level: 'read',
+					granted_by: 'chat',
+					granted_at: expect.any(String),
+					granted_at_in_words: expect.any(String)
+				}
 			]
 		});
 	});

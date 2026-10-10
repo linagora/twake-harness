@@ -1,3 +1,8 @@
+import type { Locale } from '../i18n/messages.js';
+import type { LlmMessage } from '../llm/client.js';
+import { withDataChanged } from '../llm/data.js';
+import { describeMoment, type TimeZone } from './clock.js';
+
 // The names of the days of the week, from Sunday, and of the months, as a language writes a date
 interface Names {
 	readonly weekdays: readonly string[];
@@ -161,5 +166,67 @@ export function withTrueWeekdays(text: string, today: string): string {
 					: `${casedAs(name, named)}${written.slice(named.length)}`;
 			}),
 		text
+	);
+}
+
+// A date as ISO 8601 writes it, then the time of that day RFC 3339 may write after it, with its
+// offset or Z, or without one for a time that floats, as iCalendar writes one
+const DATE_TIME =
+	/^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2})(?::\d{2}(?:\.\d+)?)?(Z|[+-]\d{2}:\d{2})?)?$/i;
+
+// The key of an event's end: that of a whole day's event is the day after its last, as iCalendar
+// writes it (RFC 5545), which its words would name as if the event lasted that day too
+const END = 'end';
+
+// A date in words, its day of the week included, in the owner's language: "mardi 13 octobre 2026";
+// a time, in their zone, or as written for one that floats: "mardi 13 octobre 2026, 18:00"; null
+// for any other text, and for the day an event ends after
+function inWords(key: string, text: string, timeZone: TimeZone, locale: Locale): string | null {
+	const [, year, month, day, hour, minute, offset] = DATE_TIME.exec(text) ?? [];
+	const date = dayOf(Number(year), Number(month), Number(day));
+	if (date === null) return null;
+	if (hour === undefined) {
+		return key === END ? null : describeMoment(new Date(date), 'UTC', locale).date;
+	}
+	if (offset === undefined) {
+		const [hours, minutes] = [Number(hour), Number(minute)];
+		if (hours > 23 || minutes > 59) return null;
+		const wall = new Date(date + (hours * 60 + minutes) * 60_000);
+		return describeMoment(wall, 'UTC', locale).words;
+	}
+	const instant = new Date(text);
+	return Number.isNaN(instant.getTime()) ? null : describeMoment(instant, timeZone, locale).words;
+}
+
+// Data with each date it gives written in words beside it, under its key ending in _in_words; what
+// people wrote, under untrusted, stays as they wrote it
+function withWords(value: unknown, words: (key: string, text: string) => string | null): unknown {
+	if (Array.isArray(value)) return value.map((item) => withWords(item, words));
+	if (typeof value !== 'object' || value === null) return value;
+	const record = value as Record<string, unknown>;
+	const entries: [string, unknown][] = [];
+	for (const [key, item] of Object.entries(record)) {
+		if (key === 'untrusted') {
+			entries.push([key, item]);
+			continue;
+		}
+		entries.push([key, withWords(item, words)]);
+		const said = typeof item === 'string' ? words(key, item) : null;
+		const beside = `${key}_in_words`;
+		if (said !== null && !Object.hasOwn(record, beside)) entries.push([beside, said]);
+	}
+	return Object.fromEntries(entries);
+}
+
+// What the model reads, with each date the harness hands it as data, in a tool's answer or between
+// the fences of a message, written in words beside it, in the owner's language and zone: a model
+// works the day of the week out from an ISO 8601 date, and gets it wrong, when it could copy it
+export function withDatesInWords(
+	messages: readonly LlmMessage[],
+	timeZone: TimeZone,
+	locale: Locale
+): LlmMessage[] {
+	return withDataChanged(messages, (data) =>
+		withWords(data, (key, text) => inWords(key, text, timeZone, locale))
 	);
 }

@@ -304,7 +304,9 @@ export function makeSuggestionRunner(deps: SuggestionDeps): SuggestionRunner {
 		const now = clock.now();
 		const moment = describeMoment(now, timeZone, locale);
 		const messages = getMessages(locale);
-		const decision = await admission.admit(owner);
+		// A suggestion spends its owner's day, and never the share of it that the turns activities wake
+		// and the briefs spend, which cuts no suggestion
+		const decision = await admission.admit(owner, 'suggestion');
 		if (!decision.ok) return { kind: 'busy' };
 		try {
 			return await gate.run(owner, async (): Promise<SuggestionResult> => {
@@ -347,7 +349,9 @@ export function makeSuggestionRunner(deps: SuggestionDeps): SuggestionRunner {
 							},
 							actionsBefore: 0,
 							limitNotice: () => '',
-							today: dateIn(now, timeZone)
+							today: dateIn(now, timeZone),
+							timeZone,
+							locale
 						}
 					);
 				} catch (err: unknown) {
@@ -357,7 +361,7 @@ export function makeSuggestionRunner(deps: SuggestionDeps): SuggestionRunner {
 					}
 					throw err;
 				}
-				await admission.recordUsage(owner, turn.tokens);
+				await admission.recordUsage(owner, turn.tokens, 'suggestion');
 				if (turn.pendingCallId === undefined) return { kind: 'none', reason: 'nothing_proposed' };
 				const pendingCallId = turn.pendingCallId;
 				const call = await withPrincipal(

@@ -85,6 +85,10 @@ config:
   admissionUserDailyTokens: ''
   # Turns the whole harness may start per minute; default 400
   admissionGlobalPerMinute: ''
+  # The share of each user's daily tokens kept for their own words, from 0 to 1: the turns activities
+  # wake and the briefs may spend the rest, after which activities wake nobody until midnight and a
+  # brief is laid out with no model call. Empty means the harness default, 0.5
+  chatReserve: ''
   # The most characters of past conversation a turn shows the model, its most recent exchanges
   # whole; the session keeps every message. Empty means the harness default, 24000
   turnHistoryMaxChars: ''
@@ -144,8 +148,9 @@ config:
   delegationReminderHour: ''
   # The brief of each owner's working day, which the worker role wakes their assistant for, on the
   # days and from the time they chose, Monday to Friday from eight by default, on the wall clock of
-  # their calendar's zone, assistantTimezone until a read named one, and within three hours; it needs
-  # wakeupsRetentionMs of two days at least
+  # their calendar's zone, assistantTimezone until a read named one, and within three hours, and
+  # which the api role gives them when they ask for it; it needs wakeupsRetentionMs of two days at
+  # least
   briefEnabled: false
   # Calendar's fanout of the notifications it sends each invitee, which the worker role listens
   # to, and it alone, on a connection of its own to Calendar's vhost: each invitee of a new

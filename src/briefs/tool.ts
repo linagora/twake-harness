@@ -3,6 +3,7 @@ import { z } from 'zod';
 import {
 	dateIn,
 	isCalendarDay,
+	quarterHourOf,
 	timeOfDay,
 	WEEKDAYS,
 	type Clock,
@@ -35,16 +36,6 @@ const briefArgs = z.object({
 });
 
 type BriefArgs = z.infer<typeof briefArgs>;
-
-// A time of day as the model writes it, 07:30, in minutes after midnight, when it falls on the
-// quarter hour; null otherwise
-function quarterHourOf(time: string): number | null {
-	const match = /^(\d{1,2}):(\d{2})$/.exec(time.trim());
-	if (match === null) return null;
-	const hours = Number(match[1]);
-	const minutes = Number(match[2]);
-	return hours > 23 || minutes > 59 || minutes % 15 !== 0 ? null : hours * 60 + minutes;
-}
 
 // What the owner's request makes of what they chose, on the date they read on their wall clock,
 // or why it is refused. To resume the brief ends its pause too.

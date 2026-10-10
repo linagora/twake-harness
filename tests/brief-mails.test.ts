@@ -16,11 +16,12 @@ import {
 	LIST_TASKS,
 	MAILBOXES,
 	referencesIn,
+	seenEveryDay,
 	type Mail
 } from './helpers/brief.js';
 import { makeSettableClock } from './helpers/clock.js';
 import { startConsentRoom, type ConsentRoom } from './helpers/consent-room.js';
-import { grantConsent, withdrawConsent } from './helpers/consents.js';
+import { allowBriefReads, grantConsent, withdrawConsent } from './helpers/consents.js';
 import type { DecryptedMessage } from './helpers/e2ee-client.js';
 import type { ChatRequest, ContractCall } from './helpers/fake-apisix.js';
 
@@ -256,9 +257,8 @@ describe('my brief keeps the mails that matter, since my last brief', () => {
 	}, 240_000);
 
 	beforeEach(async () => {
-		for (const domain of ['calendar', 'mail', 'tasks']) {
-			await grantConsent(r.h.db, ALICE, domain, 'read');
-		}
+		await seenEveryDay(r.h.db, ALICE);
+		await allowBriefReads(r.h.db, ALICE);
 		inbox = { mails: [], more: false };
 		r.h.apisix.llm.script = (request) =>
 			lastUser(request).startsWith('[brief]')
@@ -297,11 +297,15 @@ describe('my brief keeps the mails that matter, since my last brief', () => {
 		}
 		// The model is handed her unread mail as Mail listed it, the newsletter left out, in the order
 		// the harness lays it out, the flagged photos first, with the people of her day's meetings,
-		// and told which five to keep
+		// and told which five to keep; each time written in words beside it, in her language and zone
 		const told = lastUser(briefCalls().slice(calls).at(0));
 		expect(dataOf(told)).toHaveProperty('mails', {
 			since: '2026-10-09T08:00:00+02:00',
-			unread: [emailOf(PHOTOS), emailOf(CLAIRE_ASKS)],
+			since_in_words: 'vendredi 9 octobre 2026, 08:00',
+			unread: [
+				{ ...emailOf(PHOTOS), received_at_in_words: 'samedi 10 octobre 2026, 11:00' },
+				{ ...emailOf(CLAIRE_ASKS), received_at_in_words: 'lundi 12 octobre 2026, 07:40' }
+			],
 			truncated: false,
 			participants: PARTICIPANTS
 		});
@@ -388,7 +392,7 @@ describe('my brief keeps the mails that matter, since my last brief', () => {
 		]);
 	});
 
-	it('leaves out my mail when I have not allowed it, which the harness’s own brief says in one line, and reads it, once I allow it again, since the last brief that did', async () => {
+	it('leaves out my mail once I took it back, which the brief says in one line, and reads it, once I allow it again, since the last brief that did', async () => {
 		const seen = briefs().length;
 		const calls = briefCalls().length;
 		const mailboxes = mailboxReads().length;
@@ -403,9 +407,13 @@ describe('my brief keeps the mails that matter, since my last brief', () => {
 		expect(mailboxReads().slice(mailboxes)).toHaveLength(0);
 		expect(mailReads().slice(emails)).toHaveLength(0);
 		const told = lastUser(briefCalls().slice(calls).at(0));
-		expect(dataOf(told)).toMatchObject({ date: '2026-10-23', not_read: { mails: 'consent' } });
+		expect(dataOf(told)).toMatchObject({ date: '2026-10-23' });
 		expect(dataOf(told)).not.toHaveProperty('mails');
-		expect(friday.body).toContain("Je n'ai pas pu lire tes mails aujourd'hui.");
+		expect(dataOf(told)).not.toHaveProperty('not_read');
+		expect(friday.body).toMatch(
+			/\n\nJe ne lis plus tes mails : pour que je les lise de nouveau, dis-moi « lis mes mails »\.$/
+		);
+		expect(friday.body).not.toContain("Je n'ai pas pu lire tes mails");
 		expect(friday.body).not.toContain('Tes mails non lus');
 		// No call waits for her, and the log says why
 		expect(await r.callsTo('mail')).toHaveLength(pending);
