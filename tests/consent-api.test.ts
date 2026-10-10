@@ -3,6 +3,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { TransactionSql } from 'postgres';
 
 import { withPrincipal, type Db } from '../src/db/client.js';
+import { getMessages } from '../src/i18n/messages.js';
 import { startTestHarness, type TestHarness } from './helpers/app.js';
 import { makeClient, type TestClient } from './helpers/client.js';
 import { readCatalog, startConsentRoom, type ConsentRoom } from './helpers/consent-room.js';
@@ -19,7 +20,17 @@ function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-const DOMAINS = ['mail', 'drive', 'notes', 'tasks', 'wiki', 'boards', 'contacts', 'forms'];
+const DOMAINS = [
+	'mail',
+	'drive',
+	'calendar',
+	'notes',
+	'tasks',
+	'wiki',
+	'boards',
+	'contacts',
+	'forms'
+];
 
 // The harness's question about a first read, all the API shows of its request
 function question(domain: string): string {
@@ -178,7 +189,13 @@ describe('my consents through the API', () => {
 		const granted = await c.put('alice', '/v1/consents/mail/read', {});
 		expect(granted).toEqual({
 			status: 201,
-			body: { domain: 'mail', level: 'read', granted_by: 'api', granted_at: expect.any(String) }
+			body: {
+				domain: 'mail',
+				level: 'read',
+				granted_by: 'api',
+				granted_at: expect.any(String),
+				label: 'mail'
+			}
 		});
 		expect((await c.put('alice', '/v1/consents/mail/read', {})).status).toBe(200);
 		expect((await c.get('alice', '/v1/consents')).body).toEqual({
@@ -209,6 +226,64 @@ describe('my consents through the API', () => {
 		});
 		expect(asked.body.answer).toBe(requestFor('mail'));
 		expect(h.apisix.contracts.calls).toHaveLength(1);
+	});
+	it('lists, grants and withdraws my availability sharing, which no contract offers', async () => {
+		// No contract of the catalog offers it, yet the API grants it at reading and lists it with
+		// the harness's own label
+		const granted = await c.put('alice', '/v1/consents/availability/read', {});
+		expect(granted).toEqual({
+			status: 201,
+			body: {
+				domain: 'availability',
+				level: 'read',
+				granted_by: 'api',
+				granted_at: expect.any(String),
+				label: 'Sharing your availability'
+			}
+		});
+		// A second yes changes nothing
+		expect((await c.put('alice', '/v1/consents/availability/read', {})).status).toBe(200);
+		const listed = await c.get<{ consents: unknown[] }>('alice', '/v1/consents');
+		expect(listed.body.consents).toContainEqual(granted.body);
+		// Only reading: the harness shares the free/busy of my calendar, never writes there
+		expect(await c.put('alice', '/v1/consents/availability/write', {})).toEqual({
+			status: 404,
+			body: { error: 'resource unavailable' }
+		});
+		// I withdraw it, and it leaves the list
+		expect((await c.delete('alice', '/v1/consents/availability/read')).status).toBe(204);
+		expect((await c.delete('alice', '/v1/consents/availability/read')).status).toBe(404);
+		const after = await c.get<{ consents: unknown[] }>('alice', '/v1/consents');
+		expect(after.body.consents).not.toContainEqual(granted.body);
+	});
+	it('keeps my availability sharing apart from the reading of my calendar', async () => {
+		// The sharing reads only the free/busy of my calendar: granting it never lets my assistant
+		// read my calendar, and allowing that reading never shares my availability
+		expect((await c.put('alice', '/v1/consents/availability/read', {})).status).toBe(201);
+		let domains = (
+			await c.get<{ consents: { domain: string; level: string }[] }>('alice', '/v1/consents')
+		).body.consents;
+		expect(domains.map((consent) => `${consent.domain} ${consent.level}`)).toEqual([
+			'availability read'
+		]);
+		expect((await c.put('alice', '/v1/consents/calendar/read', {})).status).toBe(201);
+		domains = (
+			await c.get<{ consents: { domain: string; level: string }[] }>('alice', '/v1/consents')
+		).body.consents;
+		expect(domains.map((consent) => `${consent.domain} ${consent.level}`).sort()).toEqual([
+			'availability read',
+			'calendar read'
+		]);
+		// Taking the availability sharing back leaves the calendar reading in place
+		expect((await c.delete('alice', '/v1/consents/availability/read')).status).toBe(204);
+		domains = (
+			await c.get<{ consents: { domain: string; level: string }[] }>('alice', '/v1/consents')
+		).body.consents;
+		expect(domains.map((consent) => `${consent.domain} ${consent.level}`)).toEqual([
+			'calendar read'
+		]);
+		// Leaves the suite as it found it
+		expect((await c.delete('alice', '/v1/consents/calendar/read')).status).toBe(204);
 	});
 	it("keeps my consents out of everyone else's reach", async () => {
 		expect((await c.put('alice', '/v1/consents/drive/read', {})).status).toBe(201);
@@ -498,6 +573,44 @@ describe('my consents through the API', () => {
 			body: { error: 'pending call closed', state: 'decided' }
 		});
 		expect(h.apisix.contracts.calls).toHaveLength(1);
+	});
+});
+
+describe('the label of my consents in my language', () => {
+	let h: TestHarness;
+	let c: TestClient;
+	beforeAll(async () => {
+		// The owner reads French: every label the API shows them is French
+		h = await startTestHarness({ env: { ASSISTANT_LOCALE: 'fr' } });
+		c = makeClient(h);
+		h.apisix.contracts.spec = readCatalog(['mail']);
+		for (const app of h.apps) expect(await app.agent.contracts.load()).toBe(1);
+	});
+	afterAll(async () => {
+		if (h !== undefined) await h.close();
+	});
+
+	it('shows the availability label in French, and an application label as the catalog names it', async () => {
+		// Both labels the harness owns are in the owner's language
+		expect(getMessages('en').availabilitySharing).toBe('Sharing your availability');
+		expect(getMessages('fr').availabilitySharing).toBe('Partage de tes disponibilités');
+		// The API shows the French label for the availability the owner shares
+		const availability = await c.put<{ label: string }>(
+			'alice',
+			'/v1/consents/availability/read',
+			{}
+		);
+		expect(availability.body.label).toBe('Partage de tes disponibilités');
+		// And an application the catalog does not describe keeps its id, in every language
+		const mail = await c.put<{ label: string }>('alice', '/v1/consents/mail/read', {});
+		expect(mail.body.label).toBe('mail');
+		const listed = await c.get<{ consents: { domain: string; label: string }[] }>(
+			'alice',
+			'/v1/consents'
+		);
+		expect(
+			Object.fromEntries(listed.body.consents.map((consent) => [consent.domain, consent.label]))
+		).toEqual({ availability: 'Partage de tes disponibilités', mail: 'mail' });
 	});
 });
 

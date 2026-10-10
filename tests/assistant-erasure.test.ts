@@ -244,7 +244,7 @@ describe('deleting my assistant erases what the harness keeps of it', () => {
 	};
 
 	// What I keep for my assistant besides our conversations: a note, a skill, a skill it
-	// proposed, and my permission to read my drive
+	// proposed, and my permission to read my drive and to share my availability
 	async function keepForMyAssistant(): Promise<void> {
 		const kept = await r.h.api.tool(ALICE, 'memory', {
 			action: 'add',
@@ -255,6 +255,7 @@ describe('deleting my assistant erases what the harness keeps of it', () => {
 		expect((await r.h.api.post(ALICE, '/v1/skills', SKILL)).status).toBe(201);
 		expect((await r.h.api.tool(ALICE, 'skills_propose', PROPOSAL)).status).toBe(200);
 		expect((await r.h.api.put(ALICE, '/v1/consents/drive/read', {})).status).toBe(201);
+		expect((await r.h.api.put(ALICE, '/v1/consents/availability/read', {})).status).toBe(201);
 	}
 
 	it('remembers our conversations, what I keep for it and what I allowed, while I have it', async () => {
@@ -291,7 +292,7 @@ describe('deleting my assistant erases what the harness keeps of it', () => {
 		expect(routes['memory']).toEqual({ memory: [], user: [NOTE] });
 		expect(routes['skills']).toHaveLength(1);
 		expect(routes['proposals']).toHaveLength(1);
-		expect(routes['consents']).toHaveLength(1);
+		expect(routes['consents']).toHaveLength(2);
 		pinned = (await r.h.api.get(ALICE, '/v1/assistants/me/owner-identity')).body['pinned'];
 		expect(pinned).toMatchObject({ pinned_by: 'first_use' });
 		// The zone a read of my calendar returned, kept as such a read keeps it
