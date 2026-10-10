@@ -13,7 +13,7 @@ import type { Clock } from './agent/clock.js';
 import { readMeeting } from './agent/suggestion.js';
 import { makeAgentService, type AgentService, type OwnerTurnResult } from './agent/service.js';
 import { runTool, toolCallStatus, WITHDRAW_OWN_CONSENTS } from './agent/tools.js';
-import { fetchOwnerMessages, localeOf } from './assistants/locale.js';
+import { fetchOwnerLocale, fetchOwnerMessages, localeOf } from './assistants/locale.js';
 import { requestNaming } from './assistants/naming.js';
 import { readIdentity, requestPreparation, requestRecovery } from './assistants/provisioning.js';
 import { findAssistant, setAssistantRoomId } from './assistants/repository.js';
@@ -23,8 +23,9 @@ import { makeJwtAuthenticator, type Authenticator } from './auth/jwt.js';
 import type { Config } from './config.js';
 import type { Answer } from './consents/answers.js';
 import { lookUpAnswerable, refusalNoticeJob, resumeJob } from './consents/answering.js';
-import { isConsentLevel, type ResumeRequest } from './consents/consent.js';
+import { AVAILABILITY_DOMAIN, isConsentLevel, type ResumeRequest } from './consents/consent.js';
 import { makeConsentMetrics, type AnswerOutcome, type ConsentMetrics } from './consents/metrics.js';
+import { labelOf, type DomainDescriptions } from './contracts/domains.js';
 import {
 	answerPendingCall,
 	findPendingCall,
@@ -34,12 +35,14 @@ import {
 	toConsentView,
 	toPendingCallView,
 	withdrawConsents,
+	type ConsentRecord,
+	type ConsentView,
 	type PendingCallRecord,
 	type PendingCallView,
 	type RequestState
 } from './consents/repository.js';
 import { readJsonColumn, withPrincipal, type Db, type Tx } from './db/client.js';
-import { getMessages } from './i18n/messages.js';
+import { getMessages, type Locale, type Messages } from './i18n/messages.js';
 import { enqueueJob, type EnqueueInput } from './jobs/queue.js';
 import type { LlmClient } from './llm/client.js';
 import { FAILURE_SERIALIZERS } from './logging/failures.js';
@@ -207,6 +210,36 @@ const OWNER_NOT_ON_HOMESERVER = { error: 'owner not on the homeserver' } as cons
 // question in its room
 function pendingCallClosed(state: RequestState): { error: string; state: RequestState } {
 	return { error: 'pending call closed', state };
+}
+
+// How a settings page names one of the owner's consents, in their language: the harness's own label
+// for the availability it shares, and the application as the catalog names it, or else by its id,
+// for a contract the owner allowed
+function consentLabel(
+	consent: ConsentRecord,
+	descriptions: DomainDescriptions,
+	messages: Messages,
+	locale: Locale,
+	fallback: Locale
+): string {
+	return consent.domain === AVAILABILITY_DOMAIN
+		? messages.availabilitySharing
+		: labelOf(descriptions, consent.domain, consent.level, locale, fallback).name;
+}
+
+// One of the owner's consents as a settings page reads it: what toConsentView shows, and the label
+// its language gives it
+function toLabeledConsentView(
+	consent: ConsentRecord,
+	descriptions: DomainDescriptions,
+	messages: Messages,
+	locale: Locale,
+	fallback: Locale
+): ConsentView & { readonly label: string } {
+	return {
+		...toConsentView(consent),
+		label: consentLabel(consent, descriptions, messages, locale, fallback)
+	};
 }
 
 const PENDING_CALL_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -844,10 +877,23 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 				const record = await loadPrincipal(principal);
 				if (!record.actions.includes('chat')) return reply.code(403).send(FORBIDDEN);
 				const consents = await withPrincipal(db, principal, (tx) => listConsents(tx, principal.id));
-				return { consents: consents.map(toConsentView) };
+				const locale = await fetchOwnerLocale(db, principal.id, config.locale);
+				const messages = getMessages(locale);
+				return {
+					consents: consents.map((consent) =>
+						toLabeledConsentView(
+							consent,
+							agent.contracts.domainDescriptions,
+							messages,
+							locale,
+							config.locale
+						)
+					)
+				};
 			});
 
-			// Grants a level of an application the catalog offers, ahead of its first use
+			// Grants a level of an application the catalog offers, or the harness's own availability
+			// sharing, ahead of its first use
 			scope.put<{ Params: { domain: string; level: string } }>(
 				'/consents/:domain/:level',
 				async (request, reply) => {
@@ -857,9 +903,12 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 					const record = await loadPrincipal(principal);
 					if (!record.actions.includes('chat')) return reply.code(403).send(FORBIDDEN);
 					const { domain, level } = request.params;
+					// The harness's availability sharing offers no contract, and only reading
+					const availability = domain === AVAILABILITY_DOMAIN && level === 'read';
 					const offered =
-						isConsentLevel(level) &&
-						agent.contracts.contracts.some((c) => c.domain === domain && c.level === level);
+						availability ||
+						(isConsentLevel(level) &&
+							agent.contracts.contracts.some((c) => c.domain === domain && c.level === level));
 					if (!offered) return reply.code(404).send(RESOURCE_UNAVAILABLE);
 					const { created, consent } = await withPrincipal(db, principal, async (tx) => {
 						const created = await grantConsent(tx, principal.id, domain, level, 'api');
@@ -877,7 +926,19 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 							'consent granted'
 						);
 					}
-					return reply.code(created ? 201 : 200).send(toConsentView(consent));
+					const locale = await fetchOwnerLocale(db, principal.id, config.locale);
+					const messages = getMessages(locale);
+					return reply
+						.code(created ? 201 : 200)
+						.send(
+							toLabeledConsentView(
+								consent,
+								agent.contracts.domainDescriptions,
+								messages,
+								locale,
+								config.locale
+							)
+						);
 				}
 			);
 

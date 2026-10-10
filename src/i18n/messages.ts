@@ -27,6 +27,9 @@ export interface Messages {
 	readonly language: { readonly name: string; readonly speak: string };
 	// The assistant's first message in its room with the owner
 	welcome(name: string): string;
+	// The agreement by which the owner lets their assistant share their availability with
+	// colleagues, which no contract offers and which a settings page lists by this label
+	readonly availabilitySharing: string;
 	// The name of an assistant a provisioner creates, after the first name in its owner's Matrix
 	// name, which its owner may change
 	defaultAssistantName(ownerName: string): string;
@@ -626,6 +629,7 @@ const ENGLISH: Messages = {
 	language: { name: 'English', speak: 'Speak English with the person writing to you.' },
 	welcome: (name) =>
 		`Hello, I am ${name}, your Twake Space assistant. Tell me what you need; I remember what matters and I ask before I act.`,
+	availabilitySharing: 'Sharing your availability',
 	defaultAssistantName: (ownerName) => `${firstNameOf(ownerName)}'s assistant`,
 	formerDefaultAssistantName: (ownerName) => `${ownerName}'s assistant`,
 	creator: {
@@ -1030,6 +1034,7 @@ const FRENCH: Messages = {
 	language: { name: 'Français', speak: "Parle français avec la personne qui t'écrit." },
 	welcome: (name) =>
 		`Bonjour, je m'appelle ${name} et je t'assiste sur Twake Space. Dis-moi ce dont tu as besoin : je retiens ce qui compte et je te demande avant d'agir.`,
+	availabilitySharing: 'Partage de tes disponibilités',
 	defaultAssistantName: (ownerName) => `Assistant ${withDeOrDApostrophe(firstNameOf(ownerName))}`,
 	formerDefaultAssistantName: (ownerName) => `Assistant de ${ownerName}`,
 	creator: {

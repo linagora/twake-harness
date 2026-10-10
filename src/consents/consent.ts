@@ -2,6 +2,11 @@
 // allows each level of each application on its own
 export type ConsentLevel = 'read' | 'write';
 
+// An agreement of the harness itself, which no contract offers: an owner lets their assistant share
+// their availability with colleagues, which reads the free/busy of their calendar and nothing else.
+// It lists, grants and withdraws like any application, and its label is the harness's own.
+export const AVAILABILITY_DOMAIN = 'availability';
+
 export function isConsentLevel(value: unknown): value is ConsentLevel {
 	return value === 'read' || value === 'write';
 }
