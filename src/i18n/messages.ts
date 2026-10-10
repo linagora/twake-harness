@@ -327,6 +327,9 @@ export interface Messages {
 		consentContext(author: string): string;
 		// What ends the turn of the owner's yes to that question
 		readonly consentGranted: string;
+		// The line a proposal adds when the invitee's availability could not be seen, their assistant
+		// not having shared it: the invitee named as the harness computed their address
+		inviteeNotSeen(invitee: string): string;
 	};
 	// What the harness says once the owner chose whether their assistant listens to an application,
 	// named as the catalog names it, on which their turn ends
@@ -932,7 +935,8 @@ const ENGLISH: Messages = {
 		consentContext: (author) =>
 			`I would like to propose a time slot for a message of ${author} in a conversation.`,
 		consentGranted:
-			'Thank you. I will propose time slots for the messages that arrange a meeting with you.'
+			'Thank you. I will propose time slots for the messages that arrange a meeting with you.',
+		inviteeNotSeen: (invitee) => `I could not see the availability of ${invitee}.`
 	},
 	sources: {
 		listening: (application) =>
@@ -1351,7 +1355,8 @@ const FRENCH: Messages = {
 		consentContext: (author) =>
 			`Je voudrais te proposer un créneau pour un message de ${author} dans une conversation.`,
 		consentGranted:
-			'Merci. Je te proposerai des créneaux pour les messages qui fixent un rendez-vous avec toi.'
+			'Merci. Je te proposerai des créneaux pour les messages qui fixent un rendez-vous avec toi.',
+		inviteeNotSeen: (invitee) => `Je n'ai pas pu voir les disponibilités de ${invitee}.`
 	},
 	sources: {
 		listening: (application) => `J'écoute ${application} : je te préviens de ce qui t'y arrive.`,

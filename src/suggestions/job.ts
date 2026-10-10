@@ -28,7 +28,10 @@ export const suggestPayloadSchema = z.object({
 	// When the job was queued, in ms: a job older than a few minutes is dropped, content included
 	at: z.number(),
 	quoted: z.array(quotedSchema).max(2),
-	retry: retrySchema.optional()
+	retry: retrySchema.optional(),
+	// An encrypted direct conversation whose owner invited their assistant: there it proposes from
+	// the owner's calendar alone, never reading the invitee's, and says so
+	listened: z.boolean().optional()
 });
 export type SuggestPayload = z.infer<typeof suggestPayloadSchema>;
 
