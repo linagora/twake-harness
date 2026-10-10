@@ -58,6 +58,7 @@ import { findSession, listSessionIds } from './sessions/repository.js';
 import { suggestGroup, type SuggestPayload } from './suggestions/job.js';
 import {
 	findSuggestion,
+	listenedRoomOwner,
 	muteRoomFor,
 	readCallArguments,
 	readSettings,
@@ -1011,6 +1012,11 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 							suggestion.attempt === 0 &&
 							meeting !== null
 						) {
+							// A proposal of an encrypted conversation its owner invited their assistant
+							// into: the retry searches the owner's calendar alone and never reaches the
+							// model, so the room and the invitee it remembers travel with it
+							const listened = (await listenedRoomOwner(tx, suggestion.roomId)) === principal.id;
+							const invitee = meeting.attendees[0];
 							const payload: SuggestPayload = {
 								owner: principal.id,
 								roomId: suggestion.roomId,
@@ -1023,7 +1029,8 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 									start: meeting.start,
 									end: meeting.end,
 									timeZone: meeting.time_zone ?? null
-								}
+								},
+								...(listened && invitee !== undefined ? { listened: true, other: invitee } : {})
 							};
 							await enqueueJob(tx, {
 								kind: 'suggest',

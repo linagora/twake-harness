@@ -38,14 +38,17 @@ const midnight = (day: string, timeZone: string): Date => instantIn(day, 0, time
 // first when it is still to come and the owner is free there, even outside working hours, then the
 // owner's own free slots, the requested day nearest the asked time first, before or after alike and
 // the earlier one on a tie, then the following days in order, from the start of the day when no time
-// was said, and never closer than an hour to now
+// was said, and never closer than an hour to now. A slot the owner already declined, given as its
+// start in ISO 8601, is left out of every candidate: a second try never proposes it again.
 export async function candidateSlots(
 	asked: Asked,
 	now: Date,
 	timeZone: string,
-	readers: SlotReaders
+	readers: SlotReaders,
+	declined: string | null = null
 ): Promise<readonly Slot[]> {
 	const floor = now.getTime() + NOT_BEFORE_MS;
+	const declinedAt = declined === null ? null : Date.parse(declined);
 	const periodEnd =
 		asked.until === null
 			? midnight(dayAfter(asked.day), timeZone)
@@ -57,12 +60,13 @@ export async function candidateSlots(
 	const askedAt =
 		asked.minutes === null ? null : instantIn(asked.day, asked.minutes, timeZone).getTime();
 	let first: Slot | null = null;
-	if (askedAt !== null) {
+	if (askedAt !== null && askedAt !== declinedAt) {
 		const slot = { start: new Date(askedAt), end: new Date(askedAt + asked.durationMs) };
 		if (askedAt > now.getTime() && (await readers.ownerFree(slot))) first = slot;
 	}
 	const found = (await readers.ownerSlots(search))
 		.filter((slot) => slot.start.getTime() >= floor)
+		.filter((slot) => slot.start.getTime() !== declinedAt)
 		.filter((slot) => first === null || slot.start.getTime() !== first.start.getTime());
 	const within = found.filter((slot) => slot.start.getTime() < periodEnd.getTime());
 	const after = found.filter((slot) => slot.start.getTime() >= periodEnd.getTime());
