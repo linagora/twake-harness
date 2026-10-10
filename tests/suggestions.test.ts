@@ -1003,6 +1003,86 @@ describe('the assistant proposes from the messages of channels', () => {
 			});
 		});
 
+		it("invites the room's other member when its owner alone writes, the invitee being no author", async () => {
+			const c = await listenedConversation();
+			await ownerRoom(c);
+			const spaceBefore = space.calls.length;
+			const contractsBefore = h.apisix.contracts.calls.length;
+			const llmBefore = h.apisix.llm.calls.length;
+			// The owner alone writes: the other member wrote nothing, and is still the one invited
+			await c.ownerClient.sendText(c.room, 'on se fait une réunion lundi à 8h ?');
+
+			const made = await until(() =>
+				space.calls.slice(spaceBefore).find((call) => call.body['matrixRoomId'] === c.room)
+			);
+			expect(made.body['matrixUserId']).toBe(c.owner.userId);
+			expect(String(made.body['text'])).toContain(c.otherPrincipal);
+
+			// No contract call names the invitee, and the proposal is not a nobody_else
+			const calls = h.apisix.contracts.calls.slice(contractsBefore);
+			expect(calls.filter((call) => call.method === 'POST')).toHaveLength(0);
+			for (const call of calls) {
+				expect(JSON.stringify(call.query)).not.toContain(c.otherPrincipal);
+				expect(JSON.stringify(call.body)).not.toContain(c.otherPrincipal);
+			}
+			const decided = h
+				.logLines()
+				.slice(llmBefore)
+				.filter((line) => String(line['msg']) === 'suggestion decided');
+			expect(decided.some((line) => line['reason'] === 'nobody_else')).toBe(false);
+			// The yes invites the other member alone
+			const id = made.body['pendingCallId'] as string;
+			await h.api.post(c.ownerPrincipal, `/v1/pending-calls/${id}/approve`, {});
+			const posted = await until(() =>
+				h.apisix.contracts.calls.slice(contractsBefore).find((call) => call.method === 'POST')
+			);
+			expect(posted.body).toMatchObject({ attendees: [c.otherPrincipal] });
+			expect(c.written()).toHaveLength(0);
+		});
+
+		it("proposes to the listening assistant's owner when the other member writes, the author invited", async () => {
+			const c = await listenedConversation();
+			await ownerRoom(c);
+			const spaceBefore = space.calls.length;
+			// The other member writes: the proposal still goes to the owner of the assistant that
+			// listens, who is the organizer, and the author is the one invited
+			await c.otherClient.sendText(c.room, 'on se voit lundi à 8h ?');
+			const made = await until(() =>
+				space.calls.slice(spaceBefore).find((call) => call.body['matrixRoomId'] === c.room)
+			);
+			expect(made.body['matrixUserId']).toBe(c.owner.userId);
+			expect(String(made.body['text'])).toContain(c.otherPrincipal);
+			expect(c.written()).toHaveLength(0);
+		});
+
+		it('stays listening, and declines a second assistant, when the other member invites their own', async () => {
+			const c = await listenedConversation();
+			const rows = await withPrincipal(
+				h.db,
+				{ id: c.otherPrincipal },
+				(tx) => tx.sql<{ user_id: string }[]>`
+					select user_id from assistants where owner = ${c.otherPrincipal}`
+			);
+			const otherAssistant = rows[0]?.user_id ?? '';
+			await c.otherClient.client.inviteUser(otherAssistant, c.room);
+			// The other's assistant is declined: the room is already one the first assistant reads.
+			// It may join and leave, so the absence is waited for.
+			await until(
+				async () =>
+					(await h.synapse.joinedMembers(c.other, c.room)).includes(otherAssistant) ? null : true,
+				30_000
+			);
+			// The first assistant stays and still proposes
+			expect(await c.listened()).toBe(1);
+			const spaceBefore = space.calls.length;
+			await c.ownerClient.sendText(c.room, 'on se fait une réunion lundi à 8h ?');
+			const made = await until(() =>
+				space.calls.slice(spaceBefore).find((call) => call.body['matrixRoomId'] === c.room)
+			);
+			expect(made.body['matrixUserId']).toBe(c.owner.userId);
+			expect(c.written()).toHaveLength(0);
+		});
+
 		it('comes only on the yes of the other person, proposes to its owner alone, never writes, and leaves on a no', async () => {
 			const c = await encryptedConversation();
 			try {

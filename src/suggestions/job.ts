@@ -31,7 +31,10 @@ export const suggestPayloadSchema = z.object({
 	retry: retrySchema.optional(),
 	// An encrypted direct conversation whose owner invited their assistant: there it proposes from
 	// the owner's calendar alone, never reading the invitee's, and says so
-	listened: z.boolean().optional()
+	listened: z.boolean().optional(),
+	// The conversation's other member, the invitee, read in the room whether they wrote or not: only
+	// for a listened conversation, where the invitee is no longer the author of the messages
+	other: z.string().optional()
 });
 export type SuggestPayload = z.infer<typeof suggestPayloadSchema>;
 
