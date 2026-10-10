@@ -20,7 +20,7 @@ import {
 	type RequestState
 } from '../consents/repository.js';
 import { requestHtml, type OwnerRequest } from '../consents/request.js';
-import type { Locale, Messages } from '../i18n/messages.js';
+import { getMessages, type Locale, type Messages } from '../i18n/messages.js';
 import { settleActivity, type WokenTurnOutcome } from '../journal/repository.js';
 import type { BriefMarker } from '../matrix/brief.js';
 import type { YesNoQuestion } from '../matrix/questions.js';
@@ -607,26 +607,48 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 				attempt
 			})
 		);
-		jobLog.info({ owner, pendingCallId, attempt }, 'suggestion made');
+		jobLog.info(
+			{
+				owner,
+				pendingCallId,
+				attempt,
+				...(result.invitee === undefined ? {} : { invitee: result.invitee.availability })
+			},
+			'suggestion made'
+		);
+		// A listened conversation's proposal says the invitee's availability was not seen, in the same
+		// line, in Space and in the owner's assistant room alike
+		const sentence = proposalSentence(
+			result.locale,
+			proposal,
+			result.invitee === undefined
+				? {}
+				: {
+						inviteeNotSeen: getMessages(result.locale).suggestions.inviteeNotSeen(
+							result.invitee.address
+						)
+					}
+		);
 		const matrixUserId = matrixUserIdOfPrincipal(settings.config, owner);
 		if (settings.space !== null && matrixUserId !== null) {
 			const outcome = await settings.space.suggest({
 				matrixUserId,
 				externalId: pendingCallId,
-				text: proposalSentence(result.locale, proposal),
+				text: sentence,
 				pendingCallId,
 				matrixRoomId: roomId
 			});
 			jobLog.info({ owner, pendingCallId, outcome }, 'suggestion sent to Space');
 		}
-		await sendSuggestionQuestion(owner, result);
+		await sendSuggestionQuestion(owner, result, sentence);
 		return null;
 	}
 
 	// The harness's request about the call a suggestion froze, in the owner's assistant room
 	async function sendSuggestionQuestion(
 		owner: string,
-		result: { pendingCallId: string; answer: string; request: OwnerRequest | null }
+		result: { pendingCallId: string; answer: string; request: OwnerRequest | null },
+		sentence?: string
 	): Promise<void> {
 		const { pendingCallId } = result;
 		const assistant = await withPrincipal(db, { id: owner }, (tx) => findAssistant(tx, owner));
@@ -635,12 +657,15 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 			findPendingCall(tx, owner, pendingCallId)
 		);
 		const questionMarker = call === null ? null : toYesNoQuestion(call, requestLifetimeMs);
+		// A listened conversation's proposal is the harness's own sentence, ahead of the request's own
+		// words: the owner reads what was proposed and that the invitee's availability was not seen
+		const text = sentence === undefined ? result.answer : `${sentence}\n\n${result.answer}`;
 		await enqueueJob(db, {
 			kind: 'send',
 			payload: {
 				asUserId: assistant.userId,
 				roomId: assistant.roomId,
-				text: result.answer,
+				text,
 				request: { pendingCallId, owner },
 				...(questionMarker === null ? {} : { questionMarker }),
 				...(result.request === null ? {} : { html: requestHtml(result.request) })

@@ -131,7 +131,10 @@ export function makeSuggestionIntake(deps: IntakeDeps): SuggestionIntake {
 					roomId,
 					eventId: message.eventId,
 					at: now(),
-					quoted
+					quoted,
+					// A listened conversation, whose owner alone the message is read for, proposes from
+					// their own calendar alone
+					...(onlyFor === undefined ? {} : { listened: true })
 				};
 				const added = await enqueueJob(db, {
 					kind: 'suggest',

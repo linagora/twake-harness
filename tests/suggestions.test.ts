@@ -1,6 +1,7 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 import { withPrincipal } from '../src/db/client.js';
+import { dateIn } from '../src/agent/clock.js';
 import { buildRegistration } from '../src/matrix/registration.js';
 import { makeSpaceNotifications } from '../src/suggestions/space.js';
 import { grantConsent } from './helpers/consents.js';
@@ -43,11 +44,40 @@ const DAVE = 'dave@test.local';
 // The model, as a literal one: for the owner whose assistant it speaks as, it prepares a meeting on
 // Monday with the other person, then says nothing more
 let proposals = 0;
+// The day a listened conversation's proposal names, counted from the moment the turn reads: a day
+// still to come whatever the clock, so the asked time is a candidate
+function dayFromMoment(system: string, offsetDays: number): string {
+	const iso = /ISO 8601: (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2})/.exec(system)?.[1];
+	const base = iso === undefined ? new Date() : new Date(iso);
+	return dateIn(new Date(base.getTime() + offsetDays * 86_400_000), 'Europe/Paris');
+}
 const proposeMonday = (request: ChatRequest): ScriptedReply => {
 	const system = request.messages[0]?.content ?? '';
 	const owner = /whose address is (\S+?)\.\s/.exec(system)?.[1] ?? '';
 	if (request.messages.at(-1)?.role === 'tool') return { content: 'NONE' };
 	proposals += 1;
+	// A listened conversation gets the harness's one tool, never the two contracts: it names the day
+	// and the time, and the harness searches the owner's calendar itself
+	if (toolsOf(request).includes('propose_meeting')) {
+		return {
+			content: 'Vous avez un créneau.',
+			toolCalls: [
+				{
+					id: `call_${proposals}`,
+					type: 'function',
+					function: {
+						name: 'propose_meeting',
+						arguments: JSON.stringify({
+							day: dayFromMoment(system, 3),
+							time: '10:00',
+							duration: 30,
+							title: 'Point lundi'
+						})
+					}
+				}
+			]
+		};
+	}
 	// Told that the user declined the slot, it chooses the next one
 	const declined = request.messages.some((m) => (m.content ?? '').includes('<<<declined-proposal'));
 	const other = (system.match(/[\w.-]+@test\.local/g) ?? []).find((p) => p !== owner) ?? BOB;
@@ -782,6 +812,9 @@ describe('the assistant proposes from the messages of channels', () => {
 		interface Conversation {
 			readonly owner: MatrixUser;
 			readonly other: MatrixUser;
+			// The platform addresses the two people, as the messages and the contracts name them
+			readonly ownerPrincipal: string;
+			readonly otherPrincipal: string;
 			readonly ownerClient: E2eeClient;
 			readonly otherClient: E2eeClient;
 			readonly room: string;
@@ -807,6 +840,7 @@ describe('the assistant proposes from the messages of channels', () => {
 			const room = await ownerClient.createDirectRoom(other.userId);
 			await otherClient.joinRoom(room);
 			const principal = `o${tag}@test.local`;
+			const otherPrincipal = `t${tag}@test.local`;
 			const rows = await withPrincipal(
 				h.db,
 				{ id: principal },
@@ -817,6 +851,8 @@ describe('the assistant proposes from the messages of channels', () => {
 			return {
 				owner,
 				other,
+				ownerPrincipal: principal,
+				otherPrincipal,
 				ownerClient,
 				otherClient,
 				room,
@@ -874,6 +910,98 @@ describe('the assistant proposes from the messages of channels', () => {
 			);
 			expect(c.written()).toHaveLength(0);
 		}
+
+		// A listened conversation's proposal reads the owner's calendar alone: the suite answers it,
+		// free at the asked time and nowhere else, so the proposal is the asked time and the harness
+		// never needs a slot search's answer
+		beforeEach(() => {
+			h.apisix.contracts.handler = (call: ContractCall) => ({
+				status: 200,
+				body: call.path.endsWith('/freebusy')
+					? { start: '', end: '', free: true, busy: [] }
+					: call.path.endsWith('/availability/slots')
+						? { slots: [] }
+						: call.method === 'POST'
+							? { uid: 'm-e1' }
+							: { ok: true }
+			});
+		});
+		afterEach(() => {
+			h.apisix.contracts.handler = () => ({ status: 200, body: { ok: true } });
+		});
+
+		// The room the assistant opened with its owner, which a suggestion reaches as it does in a
+		// channel, restored where a suite had cleared it: the owner joins it to read what lands there
+		async function ownerRoom(c: Conversation): Promise<string> {
+			const rows = await h.db.sql<{ room_id: string }[]>`
+				select room_id from assistant_rooms where owner = ${c.ownerPrincipal} limit 1`;
+			const room = rows[0]?.room_id ?? '';
+			await h.db.sql`update assistants set room_id = ${room} where owner = ${c.ownerPrincipal}`;
+			await c.ownerClient.joinRoom(room);
+			return room;
+		}
+
+		it("proposes from the owner's calendar alone, says the invitee was not seen, and writes nothing", async () => {
+			const c = await listenedConversation();
+			const dm = await ownerRoom(c);
+			const spaceBefore = space.calls.length;
+			const contractsBefore = h.apisix.contracts.calls.length;
+			const llmBefore = h.apisix.llm.calls.length;
+			await c.otherClient.sendText(c.room, 'on se fait une réunion lundi à 8h ?');
+
+			// The proposal reaches the owner, in Space and in their assistant's room, with the
+			// harness's own line saying the invitee's availability was not seen
+			const made = await until(() =>
+				space.calls.slice(spaceBefore).find((call) => call.body['matrixRoomId'] === c.room)
+			);
+			expect(made.body['matrixUserId']).toBe(c.owner.userId);
+			const text = String(made.body['text']);
+			expect(text).toContain(c.otherPrincipal);
+			expect(text).toContain('I could not see the availability of');
+			expect(
+				await c.ownerClient.waitForMessage(dm, c.assistant, (t) =>
+					t.includes('I could not see the availability of')
+				)
+			).toContain(c.otherPrincipal);
+
+			// Before the yes: no write, and no read of a contract names the invitee, only the owner
+			const calls = h.apisix.contracts.calls.slice(contractsBefore);
+			expect(calls.filter((call) => call.method === 'POST')).toHaveLength(0);
+			for (const call of calls) {
+				expect(JSON.stringify(call.query)).not.toContain(c.otherPrincipal);
+				expect(JSON.stringify(call.body)).not.toContain(c.otherPrincipal);
+			}
+			const slots = calls.filter((call) => call.path.endsWith('/availability/slots'));
+			expect(slots.length).toBeGreaterThan(0);
+			for (const call of slots) {
+				const email = call.query['email'];
+				expect(Array.isArray(email) ? email : [email]).toEqual([c.ownerPrincipal]);
+			}
+			// ...and the model was offered the harness's one tool alone
+			const turns = h.apisix.llm.calls
+				.slice(llmBefore)
+				.filter((call) =>
+					(call.request.messages.at(-1)?.content ?? '').includes('<<<channel-messages')
+				);
+			expect(turns).toHaveLength(1);
+			expect(toolsOf(turns[0]?.request)).toEqual(['propose_meeting']);
+			// Nothing was written in the conversation
+			expect(c.written()).toHaveLength(0);
+
+			// The yes creates the meeting, as any suggestion's, with the invitee as sole attendee
+			const id = made.body['pendingCallId'] as string;
+			const approved = await h.api.post(c.ownerPrincipal, `/v1/pending-calls/${id}/approve`, {});
+			expect(approved.status).toBe(202);
+			const posted = await until(() =>
+				h.apisix.contracts.calls.slice(contractsBefore).find((call) => call.method === 'POST')
+			);
+			expect(posted.path).toBe('/contracts/v1/calendar/meetings');
+			expect(posted.headers['x-twake-on-behalf-of']).toBe(c.ownerPrincipal);
+			expect(posted.body).toMatchObject({
+				title: 'Point lundi',
+				attendees: [c.otherPrincipal]
+			});
+		});
 
 		it('comes only on the yes of the other person, proposes to its owner alone, never writes, and leaves on a no', async () => {
 			const c = await encryptedConversation();
