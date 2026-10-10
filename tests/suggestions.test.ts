@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
-import { withPrincipal } from '../src/db/client.js';
+import { readJsonColumn, withPrincipal } from '../src/db/client.js';
 import { dateIn } from '../src/agent/clock.js';
 import { buildRegistration } from '../src/matrix/registration.js';
 import { makeSpaceNotifications } from '../src/suggestions/space.js';
@@ -1001,6 +1001,93 @@ describe('the assistant proposes from the messages of channels', () => {
 				title: 'Point lundi',
 				attendees: [c.otherPrincipal]
 			});
+		});
+
+		it('proposes another time without the model, at the nearest free slot, and never the refused one', async () => {
+			const c = await listenedConversation();
+			const dm = await ownerRoom(c);
+			const spaceBefore = space.calls.length;
+			await c.otherClient.sendText(c.room, 'on se fait une réunion lundi à 8h ?');
+			const first = await until(() =>
+				space.calls.slice(spaceBefore).find((call) => call.body['matrixRoomId'] === c.room)
+			);
+			const firstId = first.body['pendingCallId'] as string;
+			// The refused slot, as the suggestion recorded it: the retry searches around its day
+			const refused = await withPrincipal(
+				h.db,
+				{ id: c.ownerPrincipal },
+				(tx) =>
+					tx.sql<{ starts_at: Date }[]>`
+						select starts_at from suggestions where pending_call_id = ${firstId}`
+			);
+			const refusedStart = refused[0]?.starts_at;
+			if (refusedStart === undefined) throw new Error('no suggestion recorded');
+			// One free slot an hour after the refused one, the only one the owner's calendar offers
+			const day = dateIn(new Date(refusedStart), 'Europe/Paris');
+			h.apisix.contracts.handler = (call: ContractCall) => ({
+				status: 200,
+				body: call.path.endsWith('/freebusy')
+					? { start: '', end: '', free: true, busy: [] }
+					: call.path.endsWith('/availability/slots')
+						? { slots: [{ start: `${day}T11:00:00+02:00`, end: `${day}T11:30:00+02:00` }] }
+						: call.method === 'POST'
+							? { uid: 'm-e1' }
+							: { ok: true }
+			});
+			const llmAsked = h.apisix.llm.calls.length;
+			const contractsBefore = h.apisix.contracts.calls.length;
+			const refusedResponse = await h.api.post(
+				c.ownerPrincipal,
+				`/v1/pending-calls/${firstId}/refuse`,
+				{ reason: 'another_time' }
+			);
+			expect(refusedResponse.status).toBe(200);
+			const retry = await until(() =>
+				space.calls
+					.slice(spaceBefore)
+					.find(
+						(call) => call.body['matrixRoomId'] === c.room && call.body['pendingCallId'] !== firstId
+					)
+			);
+			// The model was not asked for the second try: the harness searched the owner's calendar
+			expect(h.apisix.llm.calls.length).toBe(llmAsked);
+			const retryId = retry.body['pendingCallId'] as string;
+			expect(String(retry.body['text'])).toContain(c.otherPrincipal);
+			// The second proposal is the free slot an hour after the refused one, never the refused one
+			const frozen = await withPrincipal(
+				h.db,
+				{ id: c.ownerPrincipal },
+				(tx) =>
+					tx.sql<{ arguments: unknown }[]>`
+						select arguments from pending_calls where id = ${retryId}`
+			);
+			const args = readJsonColumn(frozen[0]?.arguments) as {
+				body?: Record<string, unknown>;
+			};
+			expect(args.body?.['start']).toBe(`${day}T11:00:00+02:00`);
+			expect(args.body?.['attendees']).toEqual([c.otherPrincipal]);
+			expect(args.body?.['title']).toBe('Point lundi');
+			// Before the yes, no contract call names the invitee
+			const calls = h.apisix.contracts.calls.slice(contractsBefore);
+			expect(calls.filter((call) => call.method === 'POST')).toHaveLength(0);
+			for (const call of calls) {
+				expect(JSON.stringify(call.query)).not.toContain(c.otherPrincipal);
+				expect(JSON.stringify(call.body)).not.toContain(c.otherPrincipal);
+			}
+			// A second refusal for another time is not tried again
+			const beforeSecond = space.calls.length;
+			await h.api.post(c.ownerPrincipal, `/v1/pending-calls/${retryId}/refuse`, {
+				reason: 'another_time'
+			});
+			await sleep(3000);
+			expect(space.calls.slice(beforeSecond)).toHaveLength(0);
+			expect(c.written()).toHaveLength(0);
+			// The first proposal told the owner in their room the invitee was not seen
+			expect(
+				await c.ownerClient.waitForMessage(dm, c.assistant, (t) =>
+					t.includes('I could not see the availability of')
+				)
+			).toContain(c.otherPrincipal);
 		});
 
 		it("invites the room's other member when its owner alone writes, the invitee being no author", async () => {

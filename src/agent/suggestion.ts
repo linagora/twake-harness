@@ -16,7 +16,7 @@ import { LlmError, type LlmClient } from '../llm/client.js';
 import { ensurePrincipal } from '../principals/repository.js';
 import { fetchOwnerTimeZone } from '../settings/time-zone.js';
 import { askSuggestionConsent } from '../suggestions/consent.js';
-import type { SuggestPayload } from '../suggestions/job.js';
+import type { Retry, SuggestPayload } from '../suggestions/job.js';
 import {
 	candidateSlots,
 	firstCandidate,
@@ -33,6 +33,7 @@ import {
 	findTimeZone,
 	isCalendarDay,
 	quarterHourOf,
+	wallDayAt,
 	type Clock
 } from './clock.js';
 import type { TurnGate } from './gate.js';
@@ -42,6 +43,7 @@ import {
 	makeToolRegistry,
 	runTool,
 	type Tool,
+	type ToolContext,
 	type ToolOutcome,
 	type ToolRegistry
 } from './tools.js';
@@ -181,6 +183,24 @@ export type MeetingBody = z.infer<typeof meetingSchema>['body'];
 export function readMeeting(args: unknown): MeetingBody | null {
 	const parsed = meetingSchema.safeParse(args);
 	return parsed.success ? parsed.data.body : null;
+}
+
+// The meeting a frozen create_meeting call holds, read under its owner's principal: what a proposal
+// says of the slot, the title and the people invited, whether the model prepared it or the code did
+async function readFrozenMeeting(
+	db: Db,
+	owner: string,
+	pendingCallId: string
+): Promise<MeetingBody | null> {
+	const call = await withPrincipal(
+		db,
+		{ id: owner },
+		async (tx) =>
+			tx.sql<{ tool: string; arguments: unknown }[]>`
+				select tool, arguments from pending_calls where id = ${pendingCallId} and owner = ${owner}`
+	);
+	const frozen = call[0];
+	return frozen?.tool === CREATE_MEETING ? readMeeting(readJsonColumn(frozen.arguments)) : null;
 }
 
 // What a guard tells the model of a call it refused, which the model reads and prepares again
@@ -347,6 +367,26 @@ function makeOwnerReaders(
 	};
 }
 
+// What a second try at another time asks for, read from the refused proposal: the day and the time
+// of the refused slot take the place of the day and the time the model named, and the title and the
+// length come from the refused proposal. A listened conversation's retry never reaches the model:
+// the harness alone searches the owner's calendar, as for a first proposal.
+function readRetryRequest(retry: Retry, timeZone: string): ListenedRequest | null {
+	const start = Date.parse(retry.start);
+	const end = Date.parse(retry.end);
+	if (Number.isNaN(start) || Number.isNaN(end) || end <= start) return null;
+	const { date, hour, minute } = wallDayAt(new Date(start), timeZone);
+	return {
+		asked: {
+			day: date,
+			until: null,
+			minutes: hour * 60 + minute,
+			durationMs: end - start
+		},
+		title: retry.title
+	};
+}
+
 const proposeArgs = z.object({
 	day: z.string(),
 	until: z.string().optional(),
@@ -387,14 +427,19 @@ function readListenedRequest(args: unknown): ListenedRequest | ToolRefusal {
 // names the day, the time, the length and the title; the harness searches the owner's calendar, and
 // never the invitee's, takes the first candidate and freezes the meeting with the invitee as its
 // sole attendee, which waits for the owner as any suggestion's write does.
-export function makeListenedTools(
+//
+// The search itself, apart from the model: a first proposal calls it from the tool, a second try at
+// another time from the code alone, both on the owner's calendar and never the invitee's.
+async function proposeListenedMeeting(
 	contracts: ContractCatalog,
 	owner: string,
 	invitee: string,
 	declined: string | null,
 	timeZone: string,
-	now: Date
-): ToolRegistry {
+	now: Date,
+	request: ListenedRequest,
+	context: ToolContext
+): Promise<ToolOutcome> {
 	const reads = makeToolRegistry([], () =>
 		contracts.tools
 			.filter((t) => [FIND_SLOTS, READ_FREEBUSY].includes(t.definition.function.name))
@@ -404,6 +449,41 @@ export function makeListenedTools(
 					: t
 			)
 	);
+	const run: ToolRunner = async (name, callArgs) => {
+		const tool = reads.find(name);
+		return tool === null ? null : runTool(tool, callArgs, context);
+	};
+	const readers = makeOwnerReaders(run, owner, timeZone, request.asked.durationMs);
+	const slot = firstCandidate(
+		await candidateSlots(request.asked, now, timeZone, readers, declined)
+	);
+	if (slot === null) {
+		return {
+			result: {
+				error: 'no_free_slot',
+				hint: 'Your owner is free nowhere over that period: answer NONE.'
+			}
+		};
+	}
+	const contract = contracts.tools.find((t) => t.definition.function.name === CREATE_MEETING);
+	if (contract === undefined) return { result: { error: 'no_contracts' } };
+	const meeting = guardMeeting(contract, new Set([invitee.toLowerCase()]), declined);
+	const { start, end } = slotArguments(slot, timeZone);
+	return runTool(
+		meeting,
+		{ body: { title: request.title, start, end, time_zone: timeZone, attendees: [invitee] } },
+		context
+	);
+}
+
+export function makeListenedTools(
+	contracts: ContractCatalog,
+	owner: string,
+	invitee: string,
+	declined: string | null,
+	timeZone: string,
+	now: Date
+): ToolRegistry {
 	const propose: Tool = {
 		definition: {
 			type: 'function',
@@ -432,27 +512,14 @@ export function makeListenedTools(
 		run: async (args, context) => {
 			const request = readListenedRequest(args);
 			if ('error' in request) return { result: request };
-			const run: ToolRunner = async (name, callArgs) => {
-				const tool = reads.find(name);
-				return tool === null ? null : runTool(tool, callArgs, context);
-			};
-			const readers = makeOwnerReaders(run, owner, timeZone, request.asked.durationMs);
-			const slot = firstCandidate(await candidateSlots(request.asked, now, timeZone, readers));
-			if (slot === null) {
-				return {
-					result: {
-						error: 'no_free_slot',
-						hint: 'Your owner is free nowhere over that period: answer NONE.'
-					}
-				};
-			}
-			const contract = contracts.tools.find((t) => t.definition.function.name === CREATE_MEETING);
-			if (contract === undefined) return { result: { error: 'no_contracts' } };
-			const meeting = guardMeeting(contract, new Set([invitee.toLowerCase()]), declined);
-			const { start, end } = slotArguments(slot, timeZone);
-			return runTool(
-				meeting,
-				{ body: { title: request.title, start, end, time_zone: timeZone, attendees: [invitee] } },
+			return proposeListenedMeeting(
+				contracts,
+				owner,
+				invitee,
+				declined,
+				timeZone,
+				now,
+				request,
 				context
 			);
 		}
@@ -538,6 +605,7 @@ export function makeSuggestionRunner(deps: SuggestionDeps): SuggestionRunner {
 		}
 		const timeZone = await fetchOwnerTimeZone(db, owner, config.timeZone);
 		const now = clock.now();
+		const actions = prepared.actions.filter((a) => a === 'contracts.call' || a === 'contracts.act');
 		// A listened conversation: the harness searches the owner's calendar alone, and the model gets
 		// one tool of the harness's own instead of the two contracts. Anywhere else the model searches
 		// and prepares the meeting itself, as today.
@@ -552,6 +620,57 @@ export function makeSuggestionRunner(deps: SuggestionDeps): SuggestionRunner {
 		if (!decision.ok) return { kind: 'busy' };
 		try {
 			return await gate.run(owner, async (): Promise<SuggestionResult> => {
+				// A second try at another time in a listened conversation: the harness alone, no model.
+				// The day and the time of the refused slot stand for the day and the time asked, and the
+				// search takes the nearest free slot of the owner's calendar that is not the refused one,
+				// then freezes the meeting as the first proposal did. Anywhere else the retry reaches the
+				// model, as today.
+				if (listened && payload.retry !== undefined) {
+					const retry = payload.retry;
+					const request = readRetryRequest(retry, timeZone);
+					if (request === null) return { kind: 'none', reason: 'not_a_meeting' };
+					const outcome = await proposeListenedMeeting(
+						contracts,
+						owner,
+						other,
+						retry.start,
+						timeZone,
+						now,
+						request,
+						{
+							principalId: owner,
+							origin: 'suggestion',
+							actions,
+							db,
+							correlationId: `suggest-${payload.eventId}`,
+							log
+						}
+					);
+					const pendingCallId = outcome.pendingCallId;
+					if (pendingCallId === undefined) return { kind: 'none', reason: 'nothing_proposed' };
+					const body = await readFrozenMeeting(db, owner, pendingCallId);
+					if (body === null) return { kind: 'none', reason: 'not_a_meeting' };
+					log.info(
+						{ principal: owner, pendingCallId, retry: true },
+						'suggestion made without model'
+					);
+					return {
+						kind: 'proposed',
+						pendingCallId,
+						locale,
+						proposal: {
+							title: body.title,
+							start: body.start,
+							end: body.end,
+							attendees: body.attendees,
+							timeZone:
+								(body.time_zone !== undefined ? findTimeZone(body.time_zone) : null) ?? timeZone
+						},
+						answer: outcome.final ?? '',
+						request: outcome.request ?? null,
+						invitee: { address: other, availability: 'not_seen' as const }
+					};
+				}
 				// The messages and the arguments the model wrote from them are logged at debug, which this
 				// flow never logs: the quotes of a channel reach no log, whatever the deployment's level
 				const turnLog = log.child(
@@ -582,9 +701,7 @@ export function makeSuggestionRunner(deps: SuggestionDeps): SuggestionRunner {
 							context: {
 								principalId: owner,
 								origin: 'suggestion',
-								actions: prepared.actions.filter(
-									(a) => a === 'contracts.call' || a === 'contracts.act'
-								),
+								actions,
 								db,
 								correlationId: `suggest-${payload.eventId}`,
 								log: turnLog
@@ -606,16 +723,7 @@ export function makeSuggestionRunner(deps: SuggestionDeps): SuggestionRunner {
 				await admission.recordUsage(owner, turn.tokens, 'suggestion');
 				if (turn.pendingCallId === undefined) return { kind: 'none', reason: 'nothing_proposed' };
 				const pendingCallId = turn.pendingCallId;
-				const call = await withPrincipal(
-					db,
-					principal,
-					async (tx) =>
-						tx.sql<{ tool: string; arguments: unknown }[]>`
-						select tool, arguments from pending_calls where id = ${pendingCallId} and owner = ${owner}`
-				);
-				const frozen = call[0];
-				const body =
-					frozen?.tool === CREATE_MEETING ? readMeeting(readJsonColumn(frozen.arguments)) : null;
+				const body = await readFrozenMeeting(db, owner, pendingCallId);
 				if (body === null) return { kind: 'none', reason: 'not_a_meeting' };
 				return {
 					kind: 'proposed',
