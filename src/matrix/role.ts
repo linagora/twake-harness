@@ -113,7 +113,7 @@ export interface MatrixRole {
 	stop(): Promise<void>;
 }
 
-// Twake Chat's request to bring an assistant into an encrypted direct conversation, and the other
+// Twake Chat's request to bring an assistant into an encrypted room, and the other
 // member's answer (D132 there)
 const ASSISTANT_REQUEST_TYPE = 'app.twake.chat.assistant_request';
 const ASSISTANT_CONSENT_TYPE = 'app.twake.chat.assistant_consent';
@@ -295,6 +295,8 @@ function textOf(event: RoomEvent): string | null {
 
 // What an assistant knows of the encryption of one of its rooms
 type RoomEncryption = 'encrypted' | 'clear' | 'unreadable';
+type ListenVerdict =
+	'ok' | 'not_encrypted' | 'owner_left' | 'no_other_person' | 'not_everyone_accepted';
 
 // The Matrix error code of a failed request, which the SDK carries on what it throws
 function errcodeOf(err: unknown): string | null {
@@ -734,32 +736,36 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 					{ roomId, sender: event.sender, eventId: event.event_id, err },
 					'decryption failed'
 				);
-				const room = (await assistantRoom(roomId)) ?? (await listenedRoom(roomId));
-				if (room === null || event.sender === room.userId) return;
-				try {
-					const fetched = await fetchMissedKeyShares(room.userId, roomId);
-					log.info({ roomId, userId: room.userId, fetched }, 'missed key shares fetched');
-				} catch (err: unknown) {
-					// Its pages before the failure may have taken the key share all the same
-					log.warn({ roomId, userId: room.userId, err }, 'missed key shares not all fetched');
-				}
-				// Tried again whatever the read found: one it joined may have taken the key share
-				try {
-					const intent = appservice.getIntentForUserId(room.userId);
-					const decrypted = await intent.underlyingClient.crypto.decryptRoomEvent(
-						new EncryptedRoomEvent(encrypted),
-						roomId
-					);
-					// The raw event, as a push hands it: the SDK's wrapper keeps its id under another name,
-					// and the message would lose it, with the dedup of its turn and its reactions
-					if (decrypted.type === 'm.room.message') {
-						await onRoomMessage(roomId, decrypted.raw, { event: encrypted });
+				const own = await assistantRoom(roomId);
+				for (const room of own !== null ? [own] : await listenedRooms(roomId)) {
+					if (event.sender === room.userId) continue;
+					try {
+						const fetched = await fetchMissedKeyShares(room.userId, roomId);
+						log.info({ roomId, userId: room.userId, fetched }, 'missed key shares fetched');
+					} catch (err: unknown) {
+						// Its pages before the failure may have taken the key share all the same
+						log.warn({ roomId, userId: room.userId, err }, 'missed key shares not all fetched');
 					}
-					// An answer whose key came late counts like any other
-					if (decrypted.type === 'm.reaction')
-						await onOwnerAnswer(roomId, decrypted.raw, encrypted);
-				} catch (retryErr: unknown) {
-					log.warn({ roomId, eventId: event.event_id, err: retryErr }, 'decryption retry failed');
+					// Tried again whatever the read found: one it joined may have taken the key share
+					try {
+						const intent = appservice.getIntentForUserId(room.userId);
+						const decrypted = await intent.underlyingClient.crypto.decryptRoomEvent(
+							new EncryptedRoomEvent(encrypted),
+							roomId
+						);
+						// The raw event, as a push hands it: the SDK's wrapper keeps its id under another name,
+						// and the message would lose it, with the dedup of its turn and its reactions
+						if (decrypted.type === 'm.room.message') {
+							await onRoomMessage(roomId, decrypted.raw, { event: encrypted });
+						}
+						// An answer whose key came late counts like any other
+						if (decrypted.type === 'm.reaction')
+							await onOwnerAnswer(roomId, decrypted.raw, encrypted);
+						// Read once: the message reaches every owner of the room whoever decrypted it
+						break;
+					} catch (retryErr: unknown) {
+						log.warn({ roomId, eventId: event.event_id, err: retryErr }, 'decryption retry failed');
+					}
 				}
 			},
 			(roomId: string, event: RoomEvent) => ({
@@ -906,13 +912,13 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			log.warn({ roomId, invited, err }, 'room members not read');
 		}
 		if (!direct && config.suggestions.enabled) {
-			let listens = false;
+			let verdict: ListenVerdict = 'not_encrypted';
 			try {
-				listens = await isOwnersEncryptedPair(intent, roomId, inviter, invited);
+				verdict = await checkListenedRoom(intent, roomId, inviter, invited);
 			} catch (err: unknown) {
 				log.warn({ roomId, invited, err }, 'room not read');
 			}
-			if (listens && !(await otherMemberAccepted(intent, roomId, inviter, invited))) {
+			if (verdict === 'not_everyone_accepted') {
 				// The other person said no, or was never asked: it leaves without a word
 				log.info({ roomId, invited, reason: 'no_consent' }, 'assistant declined an invite');
 				try {
@@ -922,13 +928,13 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 				}
 				return;
 			}
-			if (listens) {
-				// Invited by its owner, warned, into their encrypted conversation with someone who
-				// accepted it: it reads it for its owner's suggestions, says nothing there, greets no one
+			if (verdict === 'ok') {
+				// Invited by its owner, warned, into their encrypted room with people who all accepted
+				// it: it reads it for its owner's suggestions, says nothing there, greets no one
 				await db.sql`
 					insert into assistant_listened_rooms (room_id, owner, user_id)
 					values (${roomId}, ${owner}, ${invited})
-					on conflict (room_id) do nothing`;
+					on conflict (room_id, user_id) do nothing`;
 				log.info({ roomId, owner, userId: invited }, 'assistant listens for its owner');
 				return;
 			}
@@ -1030,47 +1036,65 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			: { owner: row.owner, userId: row.user_id, welcome: row.welcome };
 	}
 
-	// An encrypted direct conversation its owner invited the assistant into, which it only reads
-	async function listenedRoom(roomId: string): Promise<{ owner: string; userId: string } | null> {
+	// An encrypted room (a conversation or a channel) its owner invited the assistant into, which it only reads
+	async function listenedRooms(roomId: string): Promise<{ owner: string; userId: string }[]> {
 		const rows = await db.sql<{ owner: string; user_id: string }[]>`
 			select owner, user_id from assistant_listened_rooms where room_id = ${roomId}`;
-		const row = rows[0];
-		return row === undefined ? null : { owner: row.owner, userId: row.user_id };
+		return rows.map((row) => ({ owner: row.owner, userId: row.user_id }));
 	}
 
-	// Whether a room the owner invited their assistant into is an encrypted conversation of the owner,
-	// still in it, and one other person: there it reads, for its owner alone, and never writes
-	async function isOwnersEncryptedPair(
+	// The people of a room, joined or invited, whose yes counts: neither an assistant nor the listener
+	function isPerson(userId: string): boolean {
+		return !isAssistantUserId(config, userId) && userId !== listenerUserId(config);
+	}
+
+	// What a room the owner invited their assistant into is worth to it: an encrypted room of the
+	// owner, still in it, with other people (a direct conversation or a channel) who all said yes
+	// since they came: there it reads, for its owner alone, and never writes. Twake Chat's request
+	// and answers (D132 there) are each keyed by their sender, which the homeserver enforces for a
+	// key that is a user id, and hold the assistant in `assistant_id`; the people are read once.
+	async function checkListenedRoom(
 		intent: Intent,
 		roomId: string,
 		ownerUserId: string,
 		assistantUserId: string
-	): Promise<boolean> {
-		if ((await roomEncryption(assistantUserId, roomId)) !== 'encrypted') return false;
-		const members = await intent.underlyingClient.getRoomMembers(roomId, undefined, [
-			'join',
-			'invite'
-		]);
-		const owner = members.find((member) => member.membershipFor === ownerUserId);
-		if (owner?.membership !== 'join') return false;
-		const others = members.filter(
-			(member) => member.membershipFor !== ownerUserId && member.membershipFor !== assistantUserId
-		);
-		return others.length === 1;
-	}
-
-	// Twake Chat's request and answers (D132 there): every member but the owner answered yes after
-	// the owner's request. Each is keyed by its sender, which the homeserver enforces for a key that
-	// is a user id, and holds the assistant in `assistant_id`.
-	async function otherMemberAccepted(
-		intent: Intent,
-		roomId: string,
-		ownerUserId: string,
-		assistantUserId: string
-	): Promise<boolean> {
+	): Promise<ListenVerdict> {
+		if ((await roomEncryption(assistantUserId, roomId)) !== 'encrypted') return 'not_encrypted';
 		const state = (await intent.underlyingClient.getRoomState(roomId)) as (RoomEvent & {
 			origin_server_ts?: number;
 		})[];
+		const joinedOrInvited = state.filter(
+			(event) =>
+				event.type === 'm.room.member' &&
+				['join', 'invite'].includes(String(event.content?.['membership']))
+		);
+		const owner = joinedOrInvited.find((event) => event.state_key === ownerUserId);
+		if (owner?.content?.['membership'] !== 'join') return 'owner_left';
+		const others = joinedOrInvited.filter(
+			(event) => event.state_key !== ownerUserId && isPerson(event.state_key ?? '')
+		);
+		if (others.length === 0) return 'no_other_person';
+		const ts = (event: { origin_server_ts?: number }): number => event.origin_server_ts ?? 0;
+		// When each person's stay began: a profile change, or an invite turned join, keeps it, so
+		// that it never asks their yes again; their member events are walked back by `replaces_state`
+		const stayStart = new Map<string, number>();
+		for (const member of others) {
+			let current = member as RoomEvent & { origin_server_ts?: number };
+			for (let hops = 0; hops < 50; hops += 1) {
+				const unsigned = (current as { unsigned?: Record<string, unknown> }).unsigned;
+				const before = (unsigned?.['prev_content'] as { membership?: string } | undefined)
+					?.membership;
+				const replaces = unsigned?.['replaces_state'];
+				if (
+					before === undefined ||
+					!['join', 'invite'].includes(before) ||
+					typeof replaces !== 'string'
+				)
+					break;
+				current = (await intent.underlyingClient.getEvent(roomId, replaces)) as typeof current;
+			}
+			stayStart.set(member.state_key ?? '', ts(current));
+		}
 		const owned = (event: RoomEvent, type: string): boolean =>
 			event.type === type &&
 			event.state_key === event.sender &&
@@ -1081,28 +1105,33 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 				event.sender === ownerUserId &&
 				event.content?.['requested'] === true
 		);
-		if (request === undefined) return false;
-		const others = state
-			.filter(
-				(event) =>
-					event.type === 'm.room.member' &&
-					['join', 'invite'].includes(String(event.content?.['membership'])) &&
-					event.state_key !== ownerUserId &&
-					event.state_key !== assistantUserId
-			)
-			.map((event) => event.state_key);
-		return (
-			others.length > 0 &&
-			others.every((member) =>
-				state.some(
-					(event) =>
-						owned(event, ASSISTANT_CONSENT_TYPE) &&
-						event.sender === member &&
-						event.content?.['accepted'] === true &&
-						(event.origin_server_ts ?? 0) > (request.origin_server_ts ?? 0)
-				)
-			)
+		if (request === undefined) return 'not_everyone_accepted';
+		// A person's answer to this assistant: an entry of the `answers` map of their consent, its time
+		// the earlier of its own and the event's (a skewed clock never hides a yes), or the legacy
+		// content, one assistant, timed by the event
+		const answerOf = (event: RoomEvent & { origin_server_ts?: number }): boolean | null => {
+			if (event.type !== ASSISTANT_CONSENT_TYPE || event.state_key !== event.sender) return null;
+			const answers = event.content?.['answers'];
+			let accepted: unknown;
+			let at = ts(event);
+			if (typeof answers === 'object' && answers !== null) {
+				const entry = (answers as Record<string, { accepted?: unknown; ts?: unknown }>)[
+					assistantUserId
+				];
+				if (typeof entry !== 'object' || entry === null) return null;
+				accepted = entry.accepted;
+				if (typeof entry.ts === 'number') at = Math.min(at, entry.ts);
+			} else if (event.content?.['assistant_id'] === assistantUserId) {
+				accepted = event.content?.['accepted'];
+			} else return null;
+			// Only after the request and after the person's latest join or invite
+			const since = Math.max(ts(request), stayStart.get(event.sender ?? '') ?? 0);
+			return accepted === true && at > since;
+		};
+		const accepted = others.every((member) =>
+			state.some((event) => event.sender === member.state_key && answerOf(event) === true)
 		);
+		return accepted ? 'ok' : 'not_everyone_accepted';
 	}
 
 	// A room's encryption, as its assistant's device knows it: the SDK reads the room's
@@ -1443,8 +1472,9 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		)
 	);
 
-	// A conversation the assistant reads for its owner: it is forgotten once the assistant leaves or
-	// is removed, and left, without a word, once a third person comes in or either member goes
+	// A room an assistant reads for its owner: it is forgotten once the assistant leaves or is
+	// removed, and left, without a word, once a newcomer who has not said yes comes in, or its owner
+	// or the last other person goes
 	appservice.on(
 		'room.event',
 		guard(
@@ -1453,32 +1483,46 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 				const consent =
 					event.type === ASSISTANT_REQUEST_TYPE || event.type === ASSISTANT_CONSENT_TYPE;
 				if (event.type !== 'm.room.member' && !consent) return;
-				const listened = await listenedRoom(roomId);
-				if (listened === null) return;
 				const membership = event.content?.['membership'];
-				const forget = async (reason: string): Promise<void> => {
-					await db.sql`delete from assistant_listened_rooms where room_id = ${roomId}`;
-					suggestions.forget(roomId);
-					log.info({ roomId, owner: listened.owner, reason }, 'assistant stopped listening');
-				};
-				if (!consent && event.state_key === listened.userId) {
-					if (membership === 'leave' || membership === 'ban') await forget('removed');
-					return;
-				}
-				const intent = appservice.getIntentForUserId(listened.userId);
-				const ownerUserId = matrixUserIdOfPrincipal(config, listened.owner) ?? '';
-				// A third person, a member gone, a withdrawn request or a no: it leaves without a word
-				if (
-					(await isOwnersEncryptedPair(intent, roomId, ownerUserId, listened.userId)) &&
-					(await otherMemberAccepted(intent, roomId, ownerUserId, listened.userId))
-				) {
-					return;
-				}
-				await forget(consent ? 'no_consent' : 'not_a_pair');
-				try {
-					await intent.leaveRoom(roomId);
-				} catch (err: unknown) {
-					log.warn({ roomId, err }, 'listened room not left');
+				for (const listened of await listenedRooms(roomId)) {
+					const forget = async (reason: string): Promise<void> => {
+						await db.sql`
+							delete from assistant_listened_rooms
+							where room_id = ${roomId} and user_id = ${listened.userId}`;
+						suggestions.forget(roomId, listened.owner);
+						log.info({ roomId, owner: listened.owner, reason }, 'assistant stopped listening');
+					};
+					const intent = appservice.getIntentForUserId(listened.userId);
+					const leave = async (reason: string): Promise<void> => {
+						try {
+							await forget(reason);
+						} catch (err: unknown) {
+							log.warn({ roomId, err }, 'listened room not forgotten');
+						}
+						try {
+							await intent.leaveRoom(roomId);
+						} catch (err: unknown) {
+							log.warn({ roomId, err }, 'listened room not left');
+						}
+					};
+					try {
+						if (!consent && event.state_key === listened.userId) {
+							if (membership === 'leave' || membership === 'ban') await forget('removed');
+							continue;
+						}
+						// An assistant coming in or going asks no one's yes
+						if (!consent && !isPerson(event.state_key ?? '')) continue;
+						const ownerUserId = matrixUserIdOfPrincipal(config, listened.owner) ?? '';
+						// A newcomer who has not said yes, the owner or the last other person gone, a
+						// withdrawn request or a no: it leaves without a word
+						const verdict = await checkListenedRoom(intent, roomId, ownerUserId, listened.userId);
+						if (verdict === 'ok') continue;
+						await leave(consent ? 'no_consent' : verdict);
+					} catch (err: unknown) {
+						// A check that cannot complete fails closed, and the others' go on
+						log.warn({ roomId, owner: listened.owner, err }, 'listened room not checked');
+						await leave('check_failed');
+					}
 				}
 			},
 			(roomId: string, event: RoomEvent) => ({ roomId, eventId: event.event_id })
@@ -1512,15 +1556,13 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		if (sender === creator || isAssistantUserId(config, sender)) return;
 		// Null for a message without words, as an image or a file, which only the creator reads
 		const text = textOf(raw);
-		const listened = await listenedRoom(roomId);
-		if (listened !== null) {
-			// Never a turn there: what it reads proposes to its owner alone
-			if (raw.event_id !== undefined && text !== null) {
-				await suggestions.onMessage(
-					roomId,
-					{ sender, eventId: raw.event_id, text },
-					listened.owner
-				);
+		const listened = await listenedRooms(roomId);
+		if (listened.length > 0) {
+			// Never a turn there: what one of its assistants reads proposes to that owner alone
+			for (const { owner } of listened) {
+				if (raw.event_id !== undefined && text !== null) {
+					await suggestions.onMessage(roomId, { sender, eventId: raw.event_id, text }, owner);
+				}
 			}
 			return;
 		}

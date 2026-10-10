@@ -28,10 +28,11 @@ export interface ChannelMessage {
 }
 
 export interface SuggestionIntake {
-	// The listener left a room: the last message held of it is dropped
-	forget(roomId: string): void;
+	// The listener left a room, or an assistant stopped reading it for its owner: the last message
+	// held of it is dropped, for that owner or, without one, for all
+	forget(roomId: string, owner?: string): void;
 	// A clear message of a channel the listener is in; with `onlyFor`, a message of an encrypted
-	// direct conversation whose owner invited their assistant, which proposes to that owner alone
+	// room whose owner invited their assistant, which proposes to that owner alone
 	onMessage(roomId: string, message: ChannelMessage, onlyFor?: string): Promise<void>;
 	// The role stops: what is held goes, and nothing is looked for any more
 	stop(): void;
@@ -52,10 +53,14 @@ export function makeSuggestionIntake(deps: IntakeDeps): SuggestionIntake {
 	const { config, db, log } = deps;
 	const now = deps.now ?? Date.now;
 	// Oldest first, as a message held again goes last
+	// Under the room, or the room and its owner where an assistant reads for them: each owner of a
+	// room has the same context
 	const recent = new Map<string, Remembered>();
-	function remember(roomId: string, message: Remembered): void {
-		recent.delete(roomId);
-		recent.set(roomId, message);
+	const keyOf = (roomId: string, owner?: string): string =>
+		owner === undefined ? roomId : `${roomId}\n${owner}`;
+	function remember(key: string, message: Remembered): void {
+		recent.delete(key);
+		recent.set(key, message);
 		if (recent.size > MAX_ROOMS_IN_MEMORY) {
 			const oldest = recent.keys().next();
 			if (oldest.done !== true) recent.delete(oldest.value);
@@ -63,9 +68,9 @@ export function makeSuggestionIntake(deps: IntakeDeps): SuggestionIntake {
 	}
 	function sweep(): void {
 		const end = now() - CONTEXT_TTL_MS;
-		for (const [roomId, message] of recent) {
+		for (const [key, message] of recent) {
 			if (message.at > end) return;
-			recent.delete(roomId);
+			recent.delete(key);
 		}
 	}
 	const sweeping = setInterval(sweep, SWEEP_INTERVAL_MS);
@@ -81,8 +86,13 @@ export function makeSuggestionIntake(deps: IntakeDeps): SuggestionIntake {
 	}
 
 	return {
-		forget(roomId) {
-			recent.delete(roomId);
+		forget(roomId, owner) {
+			if (owner !== undefined) recent.delete(keyOf(roomId, owner));
+			else {
+				for (const key of recent.keys()) {
+					if (key === roomId || key.startsWith(`${roomId}\n`)) recent.delete(key);
+				}
+			}
 		},
 		stop() {
 			clearInterval(sweeping);
@@ -100,8 +110,9 @@ export function makeSuggestionIntake(deps: IntakeDeps): SuggestionIntake {
 				eventId: message.eventId,
 				at: now()
 			};
-			const previous = recent.get(roomId);
-			remember(roomId, current);
+			const key = keyOf(roomId, onlyFor);
+			const previous = recent.get(key);
+			remember(key, current);
 			if (!mayArrangeMeeting(message.text)) return;
 			// Whoever turned suggestions off is not read: not as the message that starts one, nor as its context
 			if (!(await enabled(sender))) {
