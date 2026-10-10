@@ -1038,13 +1038,40 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		return row === undefined ? null : { owner: row.owner, userId: row.user_id };
 	}
 
+	// The pair's other member, read in the room whatever they wrote, as their platform address: the
+	// one member left once the assistant and its owner are taken out. Null when the room holds none,
+	// or when their identifier maps to no address, as a member of another server's does, and then
+	// nothing is proposed.
+	async function otherMemberPrincipal(
+		roomId: string,
+		assistantUserId: string,
+		owner: string
+	): Promise<string | null> {
+		const ownerUserId = matrixUserIdOfPrincipal(config, owner);
+		if (ownerUserId === null) return null;
+		const members = await appservice
+			.getIntentForUserId(assistantUserId)
+			.underlyingClient.getRoomMembers(roomId, undefined, ['join', 'invite']);
+		const other = members.find(
+			(member) =>
+				member.membershipFor !== assistantUserId &&
+				member.membershipFor !== ownerUserId &&
+				!isAssistantUserId(config, member.membershipFor)
+		);
+		return other === undefined ? null : principalOfMatrixUser(config, other.membershipFor);
+	}
+
 	// Whether a room the owner invited their assistant into is an encrypted conversation of the owner,
-	// still in it, and one other person: there it reads, for its owner alone, and never writes
+	// still in it, and one other person: there it reads, for its owner alone, and never writes. With
+	// `ignoreAssistants`, an assistant present or invited is passed over rather than counted as a
+	// member: the listener already there stays when another member invites their own assistant, which
+	// that assistant's own invite, read strictly, still declines.
 	async function isOwnersEncryptedPair(
 		intent: Intent,
 		roomId: string,
 		ownerUserId: string,
-		assistantUserId: string
+		assistantUserId: string,
+		ignoreAssistants = false
 	): Promise<boolean> {
 		if ((await roomEncryption(assistantUserId, roomId)) !== 'encrypted') return false;
 		const members = await intent.underlyingClient.getRoomMembers(roomId, undefined, [
@@ -1054,7 +1081,10 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		const owner = members.find((member) => member.membershipFor === ownerUserId);
 		if (owner?.membership !== 'join') return false;
 		const others = members.filter(
-			(member) => member.membershipFor !== ownerUserId && member.membershipFor !== assistantUserId
+			(member) =>
+				member.membershipFor !== ownerUserId &&
+				member.membershipFor !== assistantUserId &&
+				!(ignoreAssistants && isAssistantUserId(config, member.membershipFor))
 		);
 		return others.length === 1;
 	}
@@ -1088,7 +1118,8 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 					event.type === 'm.room.member' &&
 					['join', 'invite'].includes(String(event.content?.['membership'])) &&
 					event.state_key !== ownerUserId &&
-					event.state_key !== assistantUserId
+					event.state_key !== assistantUserId &&
+					!isAssistantUserId(config, event.state_key ?? '')
 			)
 			.map((event) => event.state_key);
 		return (
@@ -1469,7 +1500,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 				const ownerUserId = matrixUserIdOfPrincipal(config, listened.owner) ?? '';
 				// A third person, a member gone, a withdrawn request or a no: it leaves without a word
 				if (
-					(await isOwnersEncryptedPair(intent, roomId, ownerUserId, listened.userId)) &&
+					(await isOwnersEncryptedPair(intent, roomId, ownerUserId, listened.userId, true)) &&
 					(await otherMemberAccepted(intent, roomId, ownerUserId, listened.userId))
 				) {
 					return;
@@ -1514,13 +1545,20 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		const text = textOf(raw);
 		const listened = await listenedRoom(roomId);
 		if (listened !== null) {
-			// Never a turn there: what it reads proposes to its owner alone
+			// Never a turn there: what it reads proposes to its owner alone. The pair's other member
+			// is read in the room, whether they wrote the message or not, so a silent invitee is
+			// still the one invited; a member of another server has no address and nothing is
+			// proposed.
 			if (raw.event_id !== undefined && text !== null) {
-				await suggestions.onMessage(
-					roomId,
-					{ sender, eventId: raw.event_id, text },
-					listened.owner
-				);
+				const other = await otherMemberPrincipal(roomId, listened.userId, listened.owner);
+				if (other !== null) {
+					await suggestions.onMessage(
+						roomId,
+						{ sender, eventId: raw.event_id, text },
+						listened.owner,
+						other
+					);
+				}
 			}
 			return;
 		}

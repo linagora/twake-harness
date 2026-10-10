@@ -479,11 +479,21 @@ export function makeSuggestionRunner(deps: SuggestionDeps): SuggestionRunner {
 		const meeting = contracts.contracts.find((c) => c.toolName === CREATE_MEETING);
 		if (slots === undefined || meeting === undefined)
 			return { kind: 'none', reason: 'no_contracts' };
-		const others = (payload.retry?.attendees ?? payload.quoted.map((q) => q.email))
-			.map((e) => e.toLowerCase())
-			.filter((e, i, all) => e !== owner.toLowerCase() && all.indexOf(e) === i);
+		// A listened conversation: the invitee is the room's other member, read in the room whether
+		// they wrote the message or not, so a silent member is still invited and the authors of the
+		// messages no longer name them. Anywhere else, as today, the invitees are the messages'
+		// authors but the owner.
+		const listened = payload.listened === true;
+		const others = listened
+			? payload.other === undefined
+				? []
+				: [payload.other.toLowerCase()]
+			: (payload.retry?.attendees ?? payload.quoted.map((q) => q.email))
+					.map((e) => e.toLowerCase())
+					.filter((e, i, all) => e !== owner.toLowerCase() && all.indexOf(e) === i);
 		const other = others[0];
-		if (other === undefined) return { kind: 'none', reason: 'nobody_else' };
+		if (other === undefined || other === owner.toLowerCase())
+			return { kind: 'none', reason: 'nobody_else' };
 		const prepared = await withPrincipal(db, principal, async (tx) => {
 			const record = await ensurePrincipal(tx, principal);
 			const assistant = await findAssistant(tx, owner);
@@ -531,7 +541,6 @@ export function makeSuggestionRunner(deps: SuggestionDeps): SuggestionRunner {
 		// A listened conversation: the harness searches the owner's calendar alone, and the model gets
 		// one tool of the harness's own instead of the two contracts. Anywhere else the model searches
 		// and prepares the meeting itself, as today.
-		const listened = payload.listened === true;
 		const registry = listened
 			? makeListenedTools(contracts, owner, other, payload.retry?.start ?? null, timeZone, now)
 			: makeSuggestionTools(contracts, owner, others, payload.retry?.start ?? null);
