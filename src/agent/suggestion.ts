@@ -868,55 +868,199 @@ export function makeSuggestionRunner(deps: SuggestionDeps): SuggestionRunner {
 		try {
 			return await gate.run(owner, async (): Promise<SuggestionResult> => {
 				// A second try at another time in a listened conversation: the harness alone, no model.
-				// The day and the time of the refused slot stand for the day and the time asked, and the
-				// search takes the nearest free slot of the owner's calendar that is not the refused one,
-				// then freezes the meeting as the first proposal did. Anywhere else the retry reaches the
-				// model, as today.
+				// The day and the time of the refused slot stand for the day and the time asked. When the
+				// invitee shares their availability, the retry asks their assistant again, as the first
+				// proposal did, excluding the refused slot: the answer's first candidate the organizer is
+				// free at is the new proposal. When they do not share it, or their assistant answers
+				// nothing, the search falls back on the organizer's own calendar, taking the nearest free
+				// slot that is not the refused one. Anywhere else the retry reaches the model, as today.
 				if (listened && payload.retry !== undefined) {
 					const retry = payload.retry;
 					const request = readRetryRequest(retry, timeZone);
 					if (request === null) return { kind: 'none', reason: 'not_a_meeting' };
-					const outcome = await proposeListenedMeeting(
-						contracts,
-						owner,
-						other,
-						retry.start,
-						timeZone,
-						now,
-						request,
-						{
-							principalId: owner,
-							origin: 'suggestion',
-							actions,
-							db,
-							correlationId: `suggest-${payload.eventId}`,
-							log
+					// The retry's own message, told apart from the refused proposal's so that its own
+					// availability request and answer stand on their own: derived from the refused
+					// proposal's, so that a retry run twice is the same message and asks once
+					const eventId = `retry:${payload.eventId}`;
+					const retryLog = log.child({ principal: owner, origin: 'suggestion' });
+					const existing = await withPrincipal(db, principal, (tx) =>
+						findAvailabilityRequestFor(tx, owner, payload.roomId, eventId)
+					);
+					// The first time: a request for the invitee's assistant, and the job that answers it.
+					// The harness froze the meeting at the nearest free slot of the organizer's calendar
+					// that is not the refused one, which the retry proposes as it stands if nothing comes
+					// back in time. A request of this retry's message that already stands is this retry's,
+					// so a second call settles it rather than asking again.
+					if (existing === null) {
+						const outcome = await proposeListenedMeeting(
+							contracts,
+							owner,
+							other,
+							retry.start,
+							timeZone,
+							now,
+							request,
+							{
+								principalId: owner,
+								origin: 'suggestion',
+								actions,
+								db,
+								correlationId: `suggest-${eventId}`,
+								log: retryLog
+							}
+						);
+						const fallbackCallId = outcome.pendingCallId;
+						if (fallbackCallId === undefined) return { kind: 'none', reason: 'nothing_proposed' };
+						const body = await readFrozenMeeting(db, owner, fallbackCallId);
+						if (body === null) return { kind: 'none', reason: 'not_a_meeting' };
+						// The invitee is not a colleague: no request crosses to another mail domain, and the
+						// retry rests on the organizer's calendar alone, as the first proposal did
+						if (!colleague) {
+							retryLog.info(
+								{ principal: owner, pendingCallId: fallbackCallId, retry: true },
+								'suggestion made without model'
+							);
+							return {
+								kind: 'proposed',
+								pendingCallId: fallbackCallId,
+								locale,
+								proposal: {
+									title: body.title,
+									start: body.start,
+									end: body.end,
+									attendees: body.attendees,
+									timeZone:
+										(body.time_zone !== undefined ? findTimeZone(body.time_zone) : null) ?? timeZone
+								},
+								answer: outcome.final ?? '',
+								request: outcome.request ?? null,
+								invitee: { address: other, availability: 'not_seen' as const }
+							};
 						}
-					);
-					const pendingCallId = outcome.pendingCallId;
-					if (pendingCallId === undefined) return { kind: 'none', reason: 'nothing_proposed' };
-					const body = await readFrozenMeeting(db, owner, pendingCallId);
-					if (body === null) return { kind: 'none', reason: 'not_a_meeting' };
-					log.info(
-						{ principal: owner, pendingCallId, retry: true },
-						'suggestion made without model'
-					);
-					return {
+						const requestId = await withPrincipal(db, principal, async (tx) => {
+							const id = await writeAvailabilityRequest(tx, {
+								organizer: owner,
+								invitee: other,
+								roomId: payload.roomId,
+								eventId,
+								askedAt: new Date(payload.at),
+								periodStart: request.asked.day,
+								periodEnd: request.asked.until,
+								askedMinutes: request.asked.minutes,
+								durationMs: request.asked.durationMs,
+								pendingCallId: fallbackCallId
+							});
+							await enqueueJob(tx, {
+								kind: 'availability',
+								payload: { owner: other, organizer: owner, requestId: id },
+								dedupKey: `availability:${id}`,
+								groupKey: availabilityGroup(other)
+							});
+							return id;
+						});
+						retryLog.info({ owner, requestId, retry: true }, 'availability requested');
+						return { kind: 'availability', requestId };
+					}
+					// A later pass: the request is this retry's, and its answer may have come. The frozen
+					// call it keeps is the fallback the retry proposes when the invitee answered nothing or
+					// too late, and the one its own candidate rewrites.
+					const pendingCallId = existing.pendingCallId;
+					const fallback = await readFrozenMeeting(db, owner, pendingCallId);
+					if (fallback === null) return { kind: 'none', reason: 'not_a_meeting' };
+					const retryProposal = (
+						availability: 'not_seen' | 'seen_free',
+						start: string,
+						end: string
+					): SuggestionResult => ({
 						kind: 'proposed',
 						pendingCallId,
 						locale,
 						proposal: {
-							title: body.title,
-							start: body.start,
-							end: body.end,
-							attendees: body.attendees,
+							title: fallback.title,
+							start,
+							end,
+							attendees: fallback.attendees,
 							timeZone:
-								(body.time_zone !== undefined ? findTimeZone(body.time_zone) : null) ?? timeZone
+								(fallback.time_zone !== undefined ? findTimeZone(fallback.time_zone) : null) ??
+								timeZone
 						},
-						answer: outcome.final ?? '',
-						request: outcome.request ?? null,
-						invitee: { address: other, availability: 'not_seen' as const }
+						answer: '',
+						request: null,
+						invitee: { address: other, availability }
+					});
+					// While no answer came and the request's window is still open, the retry waits again;
+					// past the window it falls back on the organizer's calendar, as when nothing was asked
+					if (existing.answer === null) {
+						if (clock.now().getTime() - existing.askedAt.getTime() <= SUGGEST_MAX_AGE_MS) {
+							return { kind: 'availability', requestId: existing.id };
+						}
+						retryLog.info(
+							{ principal: owner, pendingCallId, retry: true },
+							'suggestion made without model'
+						);
+						return retryProposal('not_seen', fallback.start, fallback.end);
+					}
+					const windows = windowsOf(existing.answer);
+					if (windows.length === 0) {
+						retryLog.info(
+							{ principal: owner, pendingCallId, retry: true },
+							'suggestion made without model'
+						);
+						return retryProposal('not_seen', fallback.start, fallback.end);
+					}
+					// The organizer's own free/busy over each candidate, the first it is free at: the meeting
+					// the retry proposes, which the frozen call takes the place of. The candidate never
+					// reaches a model.
+					const crossContext: ToolContext = {
+						principalId: owner,
+						origin: 'suggestion',
+						actions,
+						db,
+						correlationId: `suggest-${eventId}`,
+						log: retryLog
 					};
+					const readers = makeOwnerReaders(
+						async (name, callArgs) => {
+							const tool = contracts.tools.find((t) => t.definition.function.name === name);
+							return tool === undefined ? null : runTool(tool, callArgs, crossContext);
+						},
+						owner,
+						timeZone,
+						existing.durationMs
+					);
+					let chosen: Window | null = null;
+					for (const window of windows) {
+						// The invitee's assistant answers the refused slot as the asked time, as it
+						// answers any asked time: it is never the retry's proposal, which another moment
+						// asks for
+						if (window.start.getTime() === Date.parse(retry.start)) continue;
+						if (await readers.ownerFree(window)) {
+							chosen = window;
+							break;
+						}
+					}
+					if (chosen === null) {
+						await withPrincipal(db, principal, (tx) => clearAvailabilityRequest(tx, existing.id));
+						return { kind: 'none', reason: 'no_common_slot' };
+					}
+					const { start, end } = slotArguments(chosen, timeZone);
+					await withPrincipal(db, principal, async (tx) => {
+						await rewritePendingCallArguments(tx, owner, pendingCallId, {
+							body: {
+								title: fallback.title,
+								start,
+								end,
+								time_zone: fallback.time_zone ?? timeZone,
+								attendees: fallback.attendees
+							}
+						});
+						await clearAvailabilityRequest(tx, existing.id);
+					});
+					retryLog.info(
+						{ principal: owner, pendingCallId, retry: true },
+						'suggestion made without model'
+					);
+					return retryProposal('seen_free', start, end);
 				}
 				// The messages and the arguments the model wrote from them are logged at debug, which this
 				// flow never logs: the quotes of a channel reach no log, whatever the deployment's level

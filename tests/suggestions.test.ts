@@ -2358,6 +2358,153 @@ describe('the assistant proposes from the messages of channels', () => {
 				);
 				expect(text).toContain('free slots only');
 			});
+
+			// E2 of the epic, #301: « un autre moment » on a proposal from a listened conversation
+			// asks the invitee's assistant again, excluding the refused slot, once only. The title,
+			// the duration and the invitee come from the refused proposal, and the refused slot stands
+			// in for the asked time, as in #295. The new proposal follows the #297 path: the invitee
+			// seen free, or the organizer's calendar alone. No model call.
+			it('asks the invitee’s assistant again for another moment, and proposes another slot both are free at', async () => {
+				const c = await listenedConversation();
+				await inviteeAssistant(c);
+				await shareAvailability(c);
+				const dm = await ownerRoom(c);
+				const asked = askedDay();
+				const askedAt = at(asked, '10:00');
+				const otherAt = at(asked, '14:00');
+				// The invitee is free at the asked time and offers 14:00; the organizer is free at both
+				h.apisix.contracts.handler = availabilityHandler({
+					invitee: c.otherPrincipal,
+					inviteeFree: (start) => Date.parse(start) === askedAt,
+					inviteeSlots: inviteeSlotAt('14:00'),
+					organizerFree: () => true,
+					organizerSlots: inviteeSlotAt('14:00')
+				});
+				const linesBefore = h.logLines().length;
+				await c.otherClient.sendText(c.room, ASKING);
+				// The first proposal is the asked time, the invitee seen free there
+				const first = await proposalSeen(c, 'seen_free', linesBefore);
+				expect(first.start).toBe(askedAt);
+
+				// The owner asks for another moment: the harness asks the invitee's assistant again, no
+				// model, and the new proposal is the free slot where both are free, never the refused one
+				const llmAsked = h.apisix.llm.calls.length;
+				const contractsBefore = h.apisix.contracts.calls.length;
+				const since = h.logLines().length;
+				expect(
+					(
+						await h.api.post(c.ownerPrincipal, `/v1/pending-calls/${first.pendingCallId}/refuse`, {
+							reason: 'another_time'
+						})
+					).status
+				).toBe(200);
+				const second = await proposalSeen(c, 'seen_free', since);
+				expect(second.start).toBe(otherAt);
+				expect(second.start).not.toBe(first.start);
+				// No model ran for the second try: no turn carried the refused proposal to it, and the
+				// harness's own model-free line records the retry
+				const retryTurns = h.apisix.llm.calls
+					.slice(llmAsked)
+					.filter((call) => JSON.stringify(call.request.messages).includes('declined-proposal'));
+				expect(retryTurns).toHaveLength(0);
+				expect(
+					logged('suggestion made without model', since).some((line) => line['retry'] === true)
+				).toBe(true);
+				// The invitee's assistant answered the retry: its own calendar was read again on their
+				// behalf, and the proposal carries the candidate only they offered
+				expect(
+					h.apisix.contracts.calls
+						.slice(contractsBefore)
+						.some((call0) => call0.headers['x-twake-on-behalf-of'] === c.otherPrincipal)
+				).toBe(true);
+				expect(logged('availability requested', since).some((line) => line['retry'] === true)).toBe(
+					true
+				);
+				expect(
+					await c.ownerClient.waitForMessage(
+						dm,
+						c.assistant,
+						(t) => t.includes('is free at that time'),
+						60_000
+					)
+				).toContain(c.otherPrincipal);
+				expect(c.written()).toHaveLength(0);
+			});
+
+			it('rests on the organizer’s calendar for another moment once the invitee withdrew the sharing', async () => {
+				const c = await listenedConversation();
+				await inviteeAssistant(c);
+				await shareAvailability(c);
+				await ownerRoom(c);
+				const asked = askedDay();
+				const askedAt = at(asked, '10:00');
+				const otherAt = at(asked, '14:00');
+				h.apisix.contracts.handler = availabilityHandler({
+					invitee: c.otherPrincipal,
+					inviteeFree: (start) => Date.parse(start) === askedAt,
+					inviteeSlots: inviteeSlotAt('14:00'),
+					organizerFree: () => true,
+					organizerSlots: inviteeSlotAt('14:00')
+				});
+				const linesBefore = h.logLines().length;
+				await c.otherClient.sendText(c.room, ASKING);
+				const first = await proposalSeen(c, 'seen_free', linesBefore);
+				expect(first.start).toBe(askedAt);
+
+				// The invitee takes the sharing back on the agreements page, which keeps their refusal
+				expect(
+					(await h.api.delete(c.otherPrincipal, '/v1/consents/availability/read')).status
+				).toBe(204);
+				// Another moment: the invitee's assistant answers none, and the retry rests on the
+				// organizer's own calendar alone, never the refused slot
+				const since = h.logLines().length;
+				await h.api.post(c.ownerPrincipal, `/v1/pending-calls/${first.pendingCallId}/refuse`, {
+					reason: 'another_time'
+				});
+				const second = await proposalSeen(c, 'not_seen', since);
+				expect(second.start).toBe(otherAt);
+				expect(second.start).not.toBe(first.start);
+			});
+
+			it('proposes nothing more on another moment asked of the second proposal', async () => {
+				const c = await listenedConversation();
+				await inviteeAssistant(c);
+				await shareAvailability(c);
+				await ownerRoom(c);
+				const asked = askedDay();
+				const askedAt = at(asked, '10:00');
+				h.apisix.contracts.handler = availabilityHandler({
+					invitee: c.otherPrincipal,
+					inviteeFree: (start) => Date.parse(start) === askedAt,
+					inviteeSlots: inviteeSlotAt('14:00'),
+					organizerFree: () => true,
+					organizerSlots: inviteeSlotAt('14:00')
+				});
+				const linesBefore = h.logLines().length;
+				await c.otherClient.sendText(c.room, ASKING);
+				const first = await proposalSeen(c, 'seen_free', linesBefore);
+				const since = h.logLines().length;
+				await h.api.post(c.ownerPrincipal, `/v1/pending-calls/${first.pendingCallId}/refuse`, {
+					reason: 'another_time'
+				});
+				const second = await proposalSeen(c, 'seen_free', since);
+				expect(second.start).not.toBe(first.start);
+
+				// Another moment on the second proposal is not tried again: a second try is not offered a
+				// third, so nothing more is proposed
+				const before = space.calls.length;
+				expect(
+					(
+						await h.api.post(c.ownerPrincipal, `/v1/pending-calls/${second.pendingCallId}/refuse`, {
+							reason: 'another_time'
+						})
+					).status
+				).toBe(200);
+				await sleep(3000);
+				expect(space.calls.slice(before)).toHaveLength(0);
+				expect(logged('suggestion made', since)).toHaveLength(1);
+				expect(c.written()).toHaveLength(0);
+			});
 		});
 
 		interface Pair {
