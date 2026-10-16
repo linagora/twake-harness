@@ -1,5 +1,6 @@
 import { RabbitMQContainer, type StartedRabbitMQContainer } from '@testcontainers/rabbitmq';
 import { connect, type ChannelModel, type ConfirmChannel } from 'amqplib';
+import { startPulling } from './containers.js';
 
 // The broker of the platform, RabbitMQ 3.13 as on dev, from Google's public mirror of Docker Hub:
 // anonymous pulls from Docker Hub hit its rate limit on the organization's runners
@@ -104,7 +105,7 @@ export async function startTestBroker(options: TestBrokerOptions = {}): Promise<
 				RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS: '-rabbit channel_tick_interval 1000'
 			});
 	}
-	const container: StartedRabbitMQContainer = await image.start();
+	const container: StartedRabbitMQContainer = await startPulling(image);
 	let admin: ChannelModel = await connectAsPlatform(container.getAmqpUrl());
 	let channel = await admin.createConfirmChannel();
 	// The platform's own connections to the other vhosts, closed with the broker

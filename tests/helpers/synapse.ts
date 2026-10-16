@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { dump, load } from 'js-yaml';
 import { GenericContainer, Wait, type StartedTestContainer } from 'testcontainers';
 import { inject } from 'vitest';
+import { startPulling } from './containers.js';
 
 // The Synapse of the platform; CI also runs the suites against the latest release
 const IMAGE = process.env['SYNAPSE_IMAGE'] ?? 'ghcr.io/element-hq/synapse:v1.160.0';
@@ -148,12 +149,13 @@ async function generateConfig(dir: string): Promise<string> {
 		() => false
 	);
 	if (!generated) {
-		const generator: StartedTestContainer = await new GenericContainer(IMAGE)
-			.withEnvironment({ SYNAPSE_SERVER_NAME, SYNAPSE_REPORT_STATS: 'no', ...hostIdentity() })
-			.withBindMounts([{ source: dir, target: '/data' }])
-			.withCommand(['generate'])
-			.withWaitStrategy(Wait.forOneShotStartup())
-			.start();
+		const generator: StartedTestContainer = await startPulling(
+			new GenericContainer(IMAGE)
+				.withEnvironment({ SYNAPSE_SERVER_NAME, SYNAPSE_REPORT_STATS: 'no', ...hostIdentity() })
+				.withBindMounts([{ source: dir, target: '/data' }])
+				.withCommand(['generate'])
+				.withWaitStrategy(Wait.forOneShotStartup())
+		);
 		// The container exits once it has written them, and stopping it is what removes it
 		await generator.stop();
 	}
@@ -194,9 +196,9 @@ export async function startTestSynapse(
 		.withBindMounts([{ source: dir, target: '/data' }])
 		.withExposedPorts(8008)
 		.withExtraHosts(callbackExtraHosts());
-	const started: StartedTestContainer = await builder
-		.withWaitStrategy(Wait.forHttp('/_matrix/client/versions', 8008))
-		.start();
+	const started: StartedTestContainer = await startPulling(
+		builder.withWaitStrategy(Wait.forHttp('/_matrix/client/versions', 8008))
+	);
 	const url = `http://${started.getHost()}:${started.getMappedPort(8008)}`;
 
 	async function request(
