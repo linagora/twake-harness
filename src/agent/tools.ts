@@ -117,6 +117,9 @@ export interface ToolContext {
 	// For such a turn, the brief: a call the broker refused waits for its owner all the same, and the
 	// turn gives way to the harness's question about what they must give the platform first
 	readonly asksDelegation?: true;
+	// A write the harness is not sure its owner asked for: it waits for their yes, whatever they
+	// allowed before
+	readonly askOwner?: boolean;
 }
 
 // What the model reads when its turn's conversation was erased with its assistant while the turn

@@ -93,7 +93,8 @@ import {
 } from './tools.js';
 
 export type { TurnOrigin } from './tools.js';
-import { runTurn, TurnError } from './turn.js';
+import { runTurn, TurnError, type TurnGuard } from './turn.js';
+import { labelOf } from '../contracts/domains.js';
 import { SUGGEST_CALL, makeSuggestionConsentTool } from '../suggestions/consent.js';
 import { AVAILABILITY_SHARING_CALL, makeAvailabilitySharingTool } from '../suggestions/sharing.js';
 import {
@@ -150,6 +151,9 @@ const TOOLS_HIDDEN_FROM_EVENT_TURNS: readonly string[] = [
 // cancellation, which the model only tells, none; for a counter-proposal, whatever it is about, the
 // check of the time proposed alone, as the owner changes a meeting's time in Calendar. The turn
 // their yes resumes is told of no event, and is not held to them.
+// The contract that lists the events the platform holds of an owner, as the catalog names it
+const OWNER_EVENTS_TOOL = 'list_events';
+
 const ANSWERS_TO_A_MOVE = ['read_freebusy', 'accept_invitation', 'decline_invitation'];
 const CHECK_ALONE = ['read_freebusy'];
 const TOOLS_OF_MEETING_CHANGES: ReadonlyMap<
@@ -900,6 +904,54 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 			const woken = origin === 'event' && approved === null;
 			// The names of the tools the model is given, which its rules are built on
 			const toolNames = turnTools.definitions.map((tool) => tool.function.name);
+			// What holds the turn to a plan and checks its answer
+			const written = (name: string): (typeof contracts.contracts)[number] | undefined =>
+				contracts.contracts.find((c) => c.toolName === name && c.level === 'write');
+			const guard: TurnGuard = {
+				checkModel: config.llm.checkModel,
+				decisionModel: config.llm.decisionModel,
+				action: (name) => {
+					const contract = written(name);
+					if (contract === undefined) return null;
+					// In the owner's language when the catalog says what writing there covers, and else in
+					// the contract's own words
+					const label = labelOf(
+						contracts.domainDescriptions,
+						contract.domain,
+						'write',
+						locale,
+						config.locale
+					);
+					return label.covers === null ? contract.description : `${label.name} – ${label.covers}`;
+				},
+				// Only what this turn's tools offer, reads before writes
+				capabilities: () =>
+					[...contracts.contracts]
+						.filter((contract) => toolNames.includes(contract.toolName))
+						.sort((a, b) => Number(a.level === 'write') - Number(b.level === 'write'))
+						.map((contract) => ({
+							name: contract.toolName,
+							description: contract.description,
+							acts: contract.level === 'write'
+						})),
+				stepsNotice: (steps) => messages.notices.stepsUndone(steps),
+				doneNotice: (steps) => messages.notices.stepsDone(steps),
+				nothingDoneNotice: () => messages.notices.nothingDone,
+				// A read of the harness's own, which asks the owner nothing: without their consent already
+				// given, or the platform's permission, it reads nothing
+				ownerEvents: async () => {
+					const tool = turnTools.find(OWNER_EVENTS_TOOL);
+					if (tool === null) return null;
+					const outcome = await runTool(tool, {}, { ...context, unattended: true });
+					log.info(
+						{ tool: OWNER_EVENTS_TOOL, status: toolCallStatus(outcome) },
+						'events read for a check'
+					);
+					return toolCallStatus(outcome) !== 'ok'
+						? null
+						: { role: 'tool', name: OWNER_EVENTS_TOOL, content: JSON.stringify(outcome.result) };
+				}
+			};
 			try {
 				const turn = await runTurn(
 					{
@@ -940,7 +992,10 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 						mayStaySilent: woken,
 						today: dateIn(now, timeZone),
 						timeZone,
-						locale
+						locale,
+						// A turn is held to a plan once a decision model tells what its message asks for; a
+						// turn a suggestion started goes by its own rules
+						...(config.llm.decisionModel.length > 0 && suggestion === null ? { guard } : {})
 					}
 				);
 				// A turn that ended on the brief its owner asked for takes what the earlier briefs named

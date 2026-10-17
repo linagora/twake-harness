@@ -80,6 +80,8 @@ import { makePushedAppservice, PUSH_DEADLINE_MS } from './pushes.js';
 import { isYesNoQuestion, markQuestion, type YesNoQuestion } from './questions.js';
 import { readersOf } from './receipts.js';
 import { makeAppserviceStorage } from './storage.js';
+import { makeLlmClient } from '../llm/client.js';
+import { DECISION_MAX_TOKENS, DECISION_TIMEOUT_MS } from '../suggestions/sort.js';
 import { makeSuggestionIntake } from '../suggestions/intake.js';
 import { listenerUserId, makeChannelListener } from '../suggestions/listener.js';
 
@@ -552,6 +554,19 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		config,
 		db,
 		log,
+		// The decision model answers a probability in a few tokens and a fraction of a second: past a
+		// few seconds the words decide, so that no channel waits on it
+		...(config.llm.decisionModel.length === 0
+			? {}
+			: {
+					llm: makeLlmClient({
+						baseUrl: config.apisix.baseUrl,
+						consumerKey: config.apisix.consumerKey,
+						model: config.llm.decisionModel,
+						maxTokens: DECISION_MAX_TOKENS,
+						timeoutMs: DECISION_TIMEOUT_MS
+					})
+				}),
 		now: () => clock.now().getTime()
 	});
 

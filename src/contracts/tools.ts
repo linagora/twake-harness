@@ -242,6 +242,8 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 		}
 		if (contract.level === 'write' && comesFromOthers(context.origin)) reasons.push('event_turn');
 		if (contract.risk === 'high') reasons.push('high_risk');
+		// A write the harness is not sure its owner asked for
+		if (contract.level === 'write' && context.askOwner === true) reasons.push('unsure');
 		return reasons;
 	}
 

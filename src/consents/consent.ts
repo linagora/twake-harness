@@ -18,7 +18,8 @@ export function isConsentLevel(value: unknown): value is ConsentLevel {
 // once they said so. One request asks about every reason that applies, but the broker's
 // permission and the whole series, which each come on a request of their own: a first write that
 // answers for a whole series asks twice.
-export type WaitReason = 'consent' | 'event_turn' | 'high_risk' | 'delegation' | 'series';
+export type WaitReason =
+	'consent' | 'event_turn' | 'high_risk' | 'unsure' | 'delegation' | 'series';
 
 export type ConsentSource = 'chat' | 'api' | 'migration';
 

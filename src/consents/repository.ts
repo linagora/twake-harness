@@ -195,6 +195,7 @@ const WAIT_REASONS: Readonly<Record<WaitReason, true>> = {
 	consent: true,
 	event_turn: true,
 	high_risk: true,
+	unsure: true,
 	delegation: true,
 	series: true
 };

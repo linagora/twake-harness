@@ -24,12 +24,15 @@
 		"lint": "prettier --check . && eslint .",
 		"format": "prettier --write .",
 		"test": "vitest run",
+		"test:real": "vitest run tests/real-routing.test.ts",
 		"test:ci": "vitest run --reporter=default --reporter=json --outputFile=test-results/vitest.json",
 		"db:migrate": "tsx src/db/migrate-cli.ts",
 		"matrix:registration": "tsx src/matrix/registration-cli.ts",
 		"test:dev": "vitest run -c vitest.dev.config.ts --reporter=default --reporter=json --outputFile=dev-results/vitest.json"
 	},
 	"dependencies": {
+		"@langchain/core": "^1.2.17",
+		"@langchain/langgraph": "^1.5.0",
 		"@linagora/rabbitmq-client": "^0.6.0",
 		"drizzle-orm": "^0.45.3",
 		"fastify": "^5.12.5",
