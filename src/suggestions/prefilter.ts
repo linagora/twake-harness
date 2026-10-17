@@ -3,7 +3,7 @@
 // admission, request or model call. It is a net, not a judge: the model decides what to propose.
 
 // Longer than a line of chat is not an arrangement to meet
-const MAX_LENGTH = 600;
+export const MAX_LENGTH = 600;
 
 const WEEKDAYS =
 	'lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche|monday|tuesday|wednesday|thursday|friday|saturday|sunday';

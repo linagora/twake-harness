@@ -41,6 +41,8 @@ export interface LlmCompletion {
 // What one call may change from the client's defaults
 export interface LlmCallOptions {
 	readonly maxTokens?: number;
+	// Another model of the gateway than the client's own, such as a faster one for a short check
+	readonly model?: string;
 }
 
 export interface LlmClient {
@@ -118,7 +120,7 @@ export function makeLlmClient(options: LlmClientOptions): LlmClient {
 		maxTokens: options.maxTokens,
 		async complete(messages, tools, callOptions) {
 			const body: Record<string, unknown> = {
-				model: options.model,
+				model: callOptions?.model ?? options.model,
 				messages,
 				max_tokens: callOptions?.maxTokens ?? options.maxTokens
 			};

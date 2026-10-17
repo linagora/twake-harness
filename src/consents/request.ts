@@ -114,6 +114,10 @@ function questionFor(
 			call: itself
 		};
 	}
+	// A write the owner's message may not ask for, in an application they already allowed
+	if (call.reasons.includes('unsure') && !firstUse) {
+		return { question: consent.unsure(name), call: itself };
+	}
 	if (call.reasons.includes('event_turn')) {
 		return {
 			question: firstUse ? consent.firstEventWrite(name, covers) : consent.eventWrite(name),

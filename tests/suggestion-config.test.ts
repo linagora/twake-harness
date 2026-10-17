@@ -56,3 +56,22 @@ describe('the settings of the suggestions', () => {
 		expect(loadConfig(base).auth.audience).toBe('twake-harness');
 	});
 });
+
+describe('the tracing of a turn', () => {
+	it('refuses, at startup, to send the turns to LangSmith', () => {
+		const base = {
+			HARNESS_ROLE: 'api',
+			DATABASE_URL: 'postgres://x@localhost/x',
+			AUTH_JWKS_URL: 'https://example.test/jwks',
+			AUTH_ISSUER: 'https://example.test/',
+			AUTH_AUDIENCE: 'twake-harness',
+			APISIX_BASE_URL: 'http://apisix.test',
+			APISIX_CONSUMER_KEY: 'k'
+		};
+		expect(() => loadConfig({ ...base, LANGSMITH_TRACING: 'true' })).toThrow(/LANGSMITH_TRACING/);
+		expect(() => loadConfig({ ...base, LANGCHAIN_TRACING_V2: 'true' })).toThrow(
+			/LANGCHAIN_TRACING_V2/
+		);
+		expect(() => loadConfig({ ...base, LANGSMITH_TRACING: 'false' })).not.toThrow();
+	});
+});
