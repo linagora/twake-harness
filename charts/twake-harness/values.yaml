@@ -50,6 +50,8 @@ config:
   contractsBasePath: ''
   contractsOpenapiPath: ''
   llmModel: qwen3.8
+  # The decision model (Nox) that tells the messages arranging a meeting; empty leaves it to words
+  llmDecisionModel: ''
   # Token budget of one model call; empty means the harness default, 8192
   llmMaxTokens: ''
   logLevel: info

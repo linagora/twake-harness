@@ -50,6 +50,9 @@ export interface Config {
 	};
 	readonly llm: {
 		readonly model: string;
+		// The decision model that tells the messages arranging a meeting; empty when the gateway
+		// serves none
+		readonly decisionModel: string;
 		readonly maxTokens: number;
 		readonly timeoutMs: number;
 	};
@@ -209,6 +212,7 @@ const envSchema = z.object({
 	// Reasoning models spend part of it deliberating before they write the answer
 	LLM_MAX_TOKENS: z.coerce.number().int().min(1).default(8192),
 	LLM_TIMEOUT_MS: z.coerce.number().int().min(1000).default(120_000),
+	LLM_DECISION_MODEL: z.string().default(''),
 	TURN_MAX_TOOL_CALLS: z.coerce.number().int().min(0).default(6),
 	// About a dozen model calls, which can each read some 20,000 tokens
 	TURN_MAX_TOKENS: z.coerce.number().int().min(1).default(250_000),
@@ -458,6 +462,7 @@ export function loadConfig(env: Env): Config {
 		},
 		llm: {
 			model: values.LLM_MODEL,
+			decisionModel: values.LLM_DECISION_MODEL,
 			maxTokens: values.LLM_MAX_TOKENS,
 			timeoutMs: values.LLM_TIMEOUT_MS
 		},

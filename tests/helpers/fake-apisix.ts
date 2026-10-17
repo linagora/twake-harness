@@ -108,6 +108,10 @@ export interface FakeApisix {
 	readonly llm: {
 		calls: RecordedCall[];
 		script: LlmScript;
+		// The calls a decision model answers, kept apart from the turns' own: it answers each question
+		// with the probability a test sets for it by its name, none for the others
+		sorts: RecordedCall[];
+		probabilities: Record<string, number>;
 	};
 	// The contract catalog APISIX serves, the contracts' behaviour, and the audit route. Like the
 	// gateway, it forwards only what matches an operation of the catalog: its server path plus its
@@ -631,7 +635,12 @@ export const INVITATION_CANCELLED: ContractReply = {
 
 export async function startFakeApisix(): Promise<FakeApisix> {
 	const consumerKey = 'test-consumer-key';
-	const llm: FakeApisix['llm'] = { calls: [], script: echoScript };
+	const llm: FakeApisix['llm'] = {
+		calls: [],
+		script: echoScript,
+		sorts: [],
+		probabilities: {}
+	};
 	const fake = {
 		matrixUpstream: null as string | null,
 		matrixAsToken: null as string | null,
@@ -841,10 +850,26 @@ export async function startFakeApisix(): Promise<FakeApisix> {
 			const startedAt = Date.now();
 			const callSeq = ++seq;
 			const request = (await readJson(req)) as ChatRequest;
-			const reply = llm.script(request, llm.calls.length);
+			const isSort = (request.messages.at(-1)?.content ?? '').startsWith('{"state"');
+			const recorded = isSort ? llm.sorts : llm.calls;
+			const reply: ScriptedReply = isSort
+				? {
+						content: JSON.stringify({
+							answers: Object.fromEntries(
+								Object.keys(
+									(JSON.parse(request.messages.at(-1)?.content ?? '{}') as { questions: object })
+										.questions
+								).map((question) => [
+									question,
+									{ type: 'noul', noul: llm.probabilities[question] ?? 0 }
+								])
+							)
+						})
+					}
+				: llm.script(request, recorded.length);
 			if (reply.delayMs !== undefined) await sleep(reply.delayMs);
 			if (reply.hold !== undefined) await reply.hold;
-			llm.calls.push({ seq: callSeq, startedAt, finishedAt: Date.now(), apiKey, request });
+			recorded.push({ seq: callSeq, startedAt, finishedAt: Date.now(), apiKey, request });
 			if (reply.failWith !== undefined) {
 				sendJson(res, reply.failWith, { error: 'the model failed' });
 				return;
@@ -860,7 +885,7 @@ export async function startFakeApisix(): Promise<FakeApisix> {
 				reply.usage?.completionTokens ??
 				(reply.finishReason === 'length' ? (request.max_tokens ?? 5) : 5);
 			sendJson(res, 200, {
-				id: `chatcmpl-${llm.calls.length}`,
+				id: `chatcmpl-${recorded.length}`,
 				object: 'chat.completion',
 				model: request.model,
 				choices: [

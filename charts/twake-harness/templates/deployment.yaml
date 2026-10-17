@@ -86,6 +86,10 @@ spec:
             {{- end }}
             - name: LLM_MODEL
               value: {{ .Values.config.llmModel | quote }}
+            {{- with .Values.config.llmDecisionModel }}
+            - name: LLM_DECISION_MODEL
+              value: {{ . | quote }}
+            {{- end }}
             {{- with .Values.config.llmMaxTokens }}
             - name: LLM_MAX_TOKENS
               value: {{ . | quote }}
