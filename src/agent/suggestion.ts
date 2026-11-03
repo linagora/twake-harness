@@ -1251,6 +1251,7 @@ export function makeSuggestionRunner(deps: SuggestionDeps): SuggestionRunner {
 							},
 							actionsBefore: 0,
 							limitNotice: () => '',
+							markupNotice: () => '',
 							today: dateIn(now, timeZone),
 							timeZone,
 							locale

@@ -114,7 +114,7 @@ import { eraseHeldActivities } from '../wakeups/held.js';
 import { takeBriefWakeup } from '../wakeups/wake.js';
 import { spentForTheDay, type Admission, type Refusal, type SpentReason } from './admission.js';
 import { LIST_CALENDAR_EVENTS } from './calendar.js';
-import { withoutCallMarkup } from './call-markup.js';
+import { withoutAnyCallMarkup } from './call-markup.js';
 import {
 	dateIn,
 	describeMoment,
@@ -1169,7 +1169,11 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 				},
 				'brief model answered'
 			);
-			const text = withTrueWeekdays(withoutCallMarkup(completion.content ?? '').trim(), owner.date);
+			// The brief has no tool: a call written anywhere in it is for nobody
+			const text = withTrueWeekdays(
+				withoutAnyCallMarkup(completion.content ?? '').trim(),
+				owner.date
+			);
 			const tokens =
 				(completion.usage?.promptTokens ?? 0) + (completion.usage?.completionTokens ?? 0);
 			if (text.length > 0) return { text, tokens };

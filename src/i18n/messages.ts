@@ -95,6 +95,9 @@ export interface Messages {
 		// A turn that reached one of its limits, whose model then wrote no words for its owner: the
 		// actions it did, and how to have it carry on
 		turnLimit(actions: number): string;
+		// A turn whose model ended on a call written in its text, and wrote no words when asked
+		// again: the actions it did
+		turnCallsInText(actions: number): string;
 		// The steps of its plan a turn left undone, below its answer
 		stepsUndone(steps: readonly string[]): string;
 		// What a turn did for its owner in an application, as the results of its calls tell it
@@ -756,6 +759,8 @@ const ENGLISH: Messages = {
 			'For now I work only in a private conversation with the person I assist, so I am leaving this room.',
 		turnLimit: (actions) =>
 			`I did ${actions} ${actions === 1 ? 'action' : 'actions'} for your request, then reached my limit for this message. Say “continue” and I will carry on.`,
+		turnCallsInText: (actions) =>
+			`I did ${actions} ${actions === 1 ? 'action' : 'actions'} for your request, but my last words were not meant for you. Ask me what you want to know.`,
 		stepsUndone: (steps) =>
 			`Not done, of what I had planned:\n${steps.map((step) => `- ${step}`).join('\n')}`,
 		stepsDone: (steps) => `Done:\n${steps.map((step) => `- ${step}`).join('\n')}`,
@@ -1201,6 +1206,8 @@ const FRENCH: Messages = {
 		// One action, or none, is singular in French
 		turnLimit: (actions) =>
 			`J'ai fait ${actions} ${actions <= 1 ? 'action' : 'actions'} pour ta demande, puis j'ai atteint ma limite pour ce message. Dis « continue » pour que je poursuive.`,
+		turnCallsInText: (actions) =>
+			`J'ai fait ${actions} ${actions <= 1 ? 'action' : 'actions'} pour ta demande, mais mes derniers mots ne t'étaient pas destinés. Dis-moi ce que tu veux savoir.`,
 		stepsUndone: (steps) =>
 			`Pas fait, parmi ce que j'avais prévu :\n${steps.map((step) => `- ${step}`).join('\n')}`,
 		stepsDone: (steps) => `Fait :\n${steps.map((step) => `- ${step}`).join('\n')}`,

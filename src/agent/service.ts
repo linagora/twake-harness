@@ -1031,6 +1031,7 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 						context,
 						actionsBefore,
 						limitNotice: (actions) => messages.notices.turnLimit(actions),
+						markupNotice: (actions) => messages.notices.turnCallsInText(actions),
 						...(input.actionsDone === undefined ? {} : { actionsDone: input.actionsDone }),
 						mayStaySilent: woken,
 						today: dateIn(now, timeZone),

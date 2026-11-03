@@ -36,6 +36,8 @@ The owner writes to their assistant as they would to a person. Its `!help`, whic
 
 While it works, they see eyes (👀) on their message and the assistant typing, then a check mark (✅) once it answered. A turn that takes more than a few seconds also posts "⏳ On it…", which counts the actions done, "⏳ On it… (3 actions done)", and closes on "✅ Done", "⏸️ Limit reached" or "❌ Not done".
 
+A tool call the model writes as text, rather than makes, runs nothing and is not for the owner: they read the words around it, without the call when it stands in the tags the model's template wraps a call in or ends the answer. When the answer is such a call and nothing else, the model is asked once more for words, without tools; should it write none again, the owner reads what was done: "I did 1 action for your request, but my last words were not meant for you. Ask me what you want to know."
+
 The assistant remembers what its owner asks it to remember, finds their past conversations by the words in them, and follows the skills of their own library and of the organization's when one applies. What it learns becomes a skill proposal, which it uses only once its owner approved it. Each day, the harness also merges duplicate memories, and turns a request made the same way in three conversations or more into such a proposal.
 
 ### Acting in the Twake applications

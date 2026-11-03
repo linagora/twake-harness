@@ -95,6 +95,9 @@ export interface TurnInput {
 	// What the owner reads, in their language, when the model answers one of the turn's limits with
 	// no words for them: given the actions the turn did, what was done and how to have it go on
 	limitNotice(actions: number): string;
+	// What they read when the model, asked for words after a call written in its text, wrote none
+	// again: given the actions the turn did, what was done
+	markupNotice(actions: number): string;
 	// Told, after each call that ran, the actions the turn has done so far: its owner sees them as
 	// it goes
 	readonly actionsDone?: (actions: number) => void;
@@ -186,31 +189,33 @@ function limitReached(limit: number): { readonly error: string; readonly hint: s
 	};
 }
 
-// A limit that ends the tool calls of a turn: once it is reached, the model answers once more,
-// without tools
-type TurnLimit = 'tool_calls' | 'tokens';
+// What ends the tool calls of a turn: a limit it reached, after which the model answers once
+// more, without tools; or an answer that was a call written in its text and nothing else, after
+// which the model is asked once more, without tools, for words
+type TurnLimit = 'tool_calls' | 'tokens' | 'markup';
 
-// What the model is told of each limit when it is asked for the answer that ends its turn, and the
-// line logged when the harness then tells the owner itself, the model having no words for them
+// What the model is told when it is asked for the answer that ends its turn, with no tool left to
+// call, and the line logged when the harness then tells the owner itself, the model having no
+// words for them. At a limit, the owner learns where things stand, and that they can have it go on
 const LIMITS: Readonly<
-	Record<TurnLimit, { readonly told: (deps: TurnDeps) => string; readonly notice: string }>
+	Record<TurnLimit, { readonly instruction: (deps: TurnDeps) => string; readonly notice: string }>
 > = {
 	tool_calls: {
-		told: (deps) =>
-			`the limit of ${deps.maxToolCalls} tool calls for one message, so the calls you made past it did not run`,
+		instruction: (deps) =>
+			`You reached the limit of ${deps.maxToolCalls} tool calls for one message, so the calls you made past it did not run, and no tool is available now. Answer the user now: tell them what you did, what remains to be done, and that they can ask you to continue.`,
 		notice: 'tool call limit notice'
 	},
 	tokens: {
-		told: (deps) => `the limit of ${deps.maxTurnTokens} tokens for one message`,
+		instruction: (deps) =>
+			`You reached the limit of ${deps.maxTurnTokens} tokens for one message, and no tool is available now. Answer the user now: tell them what you did, what remains to be done, and that they can ask you to continue.`,
 		notice: 'token limit notice'
+	},
+	markup: {
+		instruction: () =>
+			'You answered the last message with a tool call written as text, which ran nothing and reached no one, and no tool is available now. Answer the user in words: tell them what you did and what remains to be done.',
+		notice: 'call markup notice'
 	}
 };
-
-// What the model is told when it is asked for the answer that ends a turn at one of its limits,
-// with no tool left to call: the owner learns where things stand, and that they can have it go on
-function wrapUpInstruction(deps: TurnDeps, reached: TurnLimit): string {
-	return `You reached ${LIMITS[reached].told(deps)}, and no tool is available now. Answer the user now: tell them what you did, what remains to be done, and that they can ask you to continue.`;
-}
 
 // The most one model call may spend: a call that ran out is retried once at twice the budget,
 // up to this
@@ -359,19 +364,11 @@ async function askModel(
 	return { completion, cut: cutShort(deps, tools, completion, spent) };
 }
 
-// The model's words to its owner; in a guarded turn, without the calls it wrote in its text
-// rather than made: a model that wrote nothing else answered nothing
-function wordsOf(completion: LlmCompletion, guarded: boolean): string {
-	const words = guarded ? withoutCallMarkup(answerOf(completion)) : answerOf(completion);
-	if (words.length === 0) throw new TurnError('the model answered nothing');
-	return words;
-}
-
-// The model's answer to its owner, which ends the turn
-function answerOf(completion: LlmCompletion): string {
-	const answer = completion.content ?? '';
-	if (answer.length === 0) throw new TurnError('the model answered nothing');
-	return answer;
+// The model's words to its owner, or beside its calls: without the calls it wrote in its text
+// rather than made, which ran nothing and are not for the owner, nor for the conversation, nor
+// for the request about a call it accompanies
+function wordsOf(completion: LlmCompletion): string {
+	return withoutCallMarkup(completion.content ?? '');
 }
 
 // What a turn carries from one step of its graph to the next
@@ -389,6 +386,9 @@ const TurnState = Annotation.Root({
 	notRun: Annotation<number>(),
 	// The model ran out while thinking past the tokens of the turn: its last call ends it
 	cut: Annotation<boolean>(),
+	// The model ended the turn on a call written in its text, which ran nothing, and no words: it
+	// is asked once more, without tools, for words
+	markup: Annotation<boolean>(),
 	// The steps of the turn, each marked done by the harness from the result of its call
 	steps: Annotation<readonly PlanStep[] | null>(),
 	// How likely the owner's message asks for each thing the assistant can do, as a decision model
@@ -646,14 +646,23 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 			}
 			// The answer stands as soon as the model gives it: the plan is a ledger of what was
 			// attempted, and the model is not sent back to a step it left
-			const words = wordsOf(completion, guard !== undefined);
-			return { iteration, draft: words, answer: words };
+			const words = wordsOf(completion);
+			if (words.length > 0) return { iteration, draft: words, answer: words };
+			// A call written in the text and nothing else: the model is asked once more for words,
+			// without tools, so that what the turn did for its owner is kept and told
+			if ((completion.content ?? '').trim().length > 0) return { iteration, markup: true };
+			throw new TurnError('the model answered nothing');
 		}
+		const said = wordsOf(completion);
 		return {
 			iteration,
 			draft: null,
 			messages: [
-				{ role: 'assistant', content: completion.content, tool_calls: completion.toolCalls }
+				{
+					role: 'assistant',
+					content: said.length === 0 ? null : said,
+					tool_calls: completion.toolCalls
+				}
 			]
 		};
 	}
@@ -894,7 +903,8 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 	// asks for it is told to give. Each limit reached is logged; the model is told of the tool calls
 	// when one answer reached both, as the calls it made past them did not run.
 	async function wrapUp(state: TurnStep): Promise<TurnUpdate> {
-		const reached: TurnLimit = state.notRun > 0 ? 'tool_calls' : 'tokens';
+		const reached: TurnLimit = state.notRun > 0 ? 'tool_calls' : state.markup ? 'markup' : 'tokens';
+		if (state.markup) deps.log.info({ actions: state.actions }, 'answer was call markup');
 		if (state.notRun > 0) {
 			deps.log.info(
 				{ limit: deps.maxToolCalls, toolCalls: state.toolCalls, notRun: state.notRun },
@@ -909,7 +919,7 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 		const asked = await askModel(
 			deps,
 			state.iteration,
-			[systemFor(state, wrapUpInstruction(deps, reached)), ...past, ...state.messages],
+			[systemFor(state, LIMITS[reached].instruction(deps)), ...past, ...state.messages],
 			[],
 			spent,
 			input
@@ -926,9 +936,10 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 						? 'tool_calls'
 						: 'empty';
 			deps.log.info({ actions: state.actions, reason }, LIMITS[reached].notice);
-			words = input.limitNotice(state.actions);
+			words =
+				reached === 'markup' ? input.markupNotice(state.actions) : input.limitNotice(state.actions);
 		}
-		return { answer: words, atLimit: true };
+		return { answer: words, ...(reached === 'markup' ? {} : { atLimit: true }) };
 	}
 
 	// The answer as the owner reads it and as the conversation keeps it: the model's words, and
@@ -969,7 +980,13 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 	const thinker = (state: TurnStep): Thinker | 'wrapUp' =>
 		spent.tokens >= deps.maxTurnTokens ? 'wrapUp' : (state.lane ?? 'model');
 	const afterAnswer = (state: TurnStep): 'tools' | 'verify' | 'wrapUp' | typeof END =>
-		state.silent ? END : state.cut ? 'wrapUp' : state.draft === null ? 'tools' : 'verify';
+		state.silent
+			? END
+			: state.cut || state.markup
+				? 'wrapUp'
+				: state.draft === null
+					? 'tools'
+					: 'verify';
 	const AFTER_ANSWER = ['tools', 'verify', 'wrapUp', END] as const;
 
 	const graph = new StateGraph(TurnState)
@@ -1010,7 +1027,12 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 			[...THINKERS, 'wrapUp', END]
 		)
 		.addEdge('verify', 'report')
-		.addEdge('wrapUp', 'report')
+		// The words asked for after a call written in the text are an answer like any other, and
+		// are checked as one; an account at a limit is the model's own, and is reported as it is
+		.addConditionalEdges('wrapUp', (state) => (state.markup ? 'verify' : 'report'), [
+			'verify',
+			'report'
+		])
 		.addEdge('report', END)
 		.compile();
 
@@ -1034,6 +1056,7 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 			iteration: 0,
 			notRun: 0,
 			cut: false,
+			markup: false,
 			steps: resumed,
 			lane: resuming ? 'act' : null,
 			named: resuming ? [...capabilityNames] : [],
