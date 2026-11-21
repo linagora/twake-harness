@@ -129,6 +129,13 @@ spec:
             - name: CHAT_MENTIONS_ENABLED
               value: "true"
             {{- end }}
+            {{- if not (has (toString .Values.config.turnGrounding) (list "off" "measure" "on")) }}
+            {{- fail "config.turnGrounding must be 'off', 'measure' or 'on' (quoted)" }}
+            {{- end }}
+            {{- if has .Values.config.turnGrounding (list "measure" "on") }}
+            - name: TURN_GROUNDING
+              value: {{ .Values.config.turnGrounding | quote }}
+            {{- end }}
             {{- with .Values.config.spaceApiUrl }}
             - name: SPACE_API_URL
               value: {{ . | quote }}

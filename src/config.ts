@@ -72,6 +72,9 @@ export interface Config {
 		// How long a turn an event woke, or one its owner's yes resumed, may wait to start once
 		// admission first refused it: it is tried again until then, and given up past it
 		readonly eventMaxDelayMs: number;
+		// Whether an answer of the owner's turn is held to the data the turn was given: not at all, only
+		// checked and logged, or written again when it is not
+		readonly grounding: 'off' | 'measure' | 'on';
 	};
 	readonly curation: {
 		readonly intervalMs: number;
@@ -234,6 +237,7 @@ const envSchema = z.object({
 	TURN_HISTORY_MAX_CHARS: z.coerce.number().int().min(1).default(24_000),
 	TURN_STATUS_DELAY_MS: z.coerce.number().int().min(1000).default(3000),
 	TURN_EVENT_MAX_DELAY_MS: z.coerce.number().int().min(1000).default(3_600_000),
+	TURN_GROUNDING: z.enum(['off', 'measure', 'on']).default('off'),
 	CURATION_INTERVAL_MS: z.coerce.number().int().min(0).default(86_400_000),
 	ADMISSION_MAX_INFLIGHT: z.coerce.number().int().min(1).default(32),
 	ADMISSION_USER_QUEUE: z.coerce.number().int().min(0).default(2),
@@ -507,7 +511,8 @@ export function loadConfig(env: Env): Config {
 			memoryNudgeInterval: values.MEMORY_NUDGE_INTERVAL,
 			historyMaxChars: values.TURN_HISTORY_MAX_CHARS,
 			statusDelayMs: values.TURN_STATUS_DELAY_MS,
-			eventMaxDelayMs: values.TURN_EVENT_MAX_DELAY_MS
+			eventMaxDelayMs: values.TURN_EVENT_MAX_DELAY_MS,
+			grounding: values.TURN_GROUNDING
 		},
 		curation: {
 			intervalMs: values.CURATION_INTERVAL_MS

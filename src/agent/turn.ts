@@ -20,6 +20,8 @@ import {
 } from '../suggestions/sort.js';
 import { withoutCallMarkup } from './call-markup.js';
 import type { TimeZone } from './clock.js';
+import { earlierData, groundPrompt, keysOf, rewriteInstruction, unfoundedKeys } from './ground.js';
+import { fenced } from '../llm/data.js';
 import { computeMessageSize, computeVisibleHistory } from './history.js';
 import {
 	describeCall,
@@ -111,6 +113,18 @@ export interface TurnInput {
 	// What holds the turn to a plan and checks its answer; without it, the model has every tool and
 	// its words go to its owner as they are
 	readonly guard?: TurnGuard;
+	// What holds the answer to the data the turn was given, when a deployment turns it on: the model
+	// that reads it sentence by sentence, and the note below a rewrite that still cites what the data
+	// does not hold
+	readonly grounding?: {
+		// Whether a failed check only logs, or has the answer written again
+		readonly mode: 'measure' | 'on';
+		readonly checkModel: string;
+		readonly notice: string;
+		// The present with its offset and the owner's zone, which the check reads times against
+		readonly now: string;
+		readonly timeZone: string;
+	};
 }
 
 // What a guarded turn needs beside its tools: what they do for the owner, the models that sort
@@ -404,6 +418,8 @@ const TurnState = Annotation.Root({
 	named: Annotation<readonly string[]>(),
 	// Whether the answer said something was done for the owner, in a turn that did nothing
 	unfounded: Annotation<boolean>(),
+	// The answer was written again from the data, and still cites what the data does not hold
+	ungrounded: Annotation<boolean>(),
 	// What the model answered without a call, before the harness checked it against the plan
 	draft: Annotation<string | null>(),
 	// What the owner reads, once a step ended the turn
@@ -898,6 +914,130 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 		}
 	}
 
+	// What a turn's answer cites that the turn was not given: the task keys it names that its prompt,
+	// its conversation, its owner's message and its results never name, and, once the turn read
+	// something, the sentences a model finds unsupported by what it read
+	async function groundCheck(
+		state: TurnStep,
+		grounding: NonNullable<TurnInput['grounding']>,
+		words: string
+	): Promise<{
+		keys: readonly string[];
+		claimed: readonly number[];
+		sentences: readonly string[];
+	}> {
+		const started = performance.now();
+		const seen = [systemFor(state), ...past, ...state.messages];
+		// What the turn was given: the system prompt, the owner's words and the results, never the
+		// assistant's own earlier answers, which are no data
+		const given = seen
+			.filter((said) => said.role !== 'assistant')
+			.map((said) => said.content ?? '')
+			.join('\n');
+		const keys = unfoundedKeys(words, given);
+		const sentences = sentencesOf(words, input.locale);
+		const results = withoutRoutePlans(state.messages)
+			.filter((said) => said.role === 'tool')
+			.map((said) => `[result of ${said.name ?? 'a tool'}] ${said.content ?? ''}`);
+		let claimed: readonly number[] = [];
+		if (results.length > 0) {
+			const asked = seen.filter((said) => said.role === 'user').at(-1)?.content ?? '';
+			try {
+				const checked = await deps.llm.complete(
+					groundPrompt({
+						asked,
+						results,
+						earlier: earlierData(past),
+						sentences,
+						now: grounding.now,
+						timeZone: grounding.timeZone
+					}),
+					[],
+					{ model: grounding.checkModel }
+				);
+				spend(deps.log, state.iteration, checked, spent);
+				claimed = readClaims(checked.content, sentences.length);
+			} catch (err: unknown) {
+				if (!(err instanceof LlmError)) throw err;
+				deps.log.warn({ err }, 'answer not checked for grounding');
+			}
+		}
+		deps.log.info(
+			{
+				keys: keysOf(words).length,
+				unfoundedKeys: keys.length,
+				sentences: sentences.length,
+				claims: claimed.length,
+				durationMs: Math.round(performance.now() - started)
+			},
+			'answer grounded'
+		);
+		return { keys, claimed, sentences };
+	}
+
+	// The harness's check that an answer holds to the data the turn was given, before verify reads
+	// its words: a task key the turn never saw, and a sentence the check model finds unsupported by
+	// the results. The model writes it again once, with no tool, told which; the words it then
+	// gives are checked again, and the owner reads below them that some details are not in their
+	// data when they still are not. A rewrite that fails keeps the draft; a check that fails changes
+	// nothing. A turn others started, a turn at a limit and the harness's own words are not checked.
+	async function ground(state: TurnStep): Promise<TurnUpdate> {
+		const { grounding } = input;
+		if (
+			grounding === undefined ||
+			comesFromOthers(input.context.origin) ||
+			state.atLimit ||
+			state.draft === null
+		) {
+			return {};
+		}
+		const first = await groundCheck(state, grounding, state.answer ?? '');
+		if (first.keys.length === 0 && first.claimed.length === 0) return {};
+		// Measured only: what the check found is logged, and the draft goes out as it is
+		if (grounding.mode === 'measure') return {};
+		let words: string;
+		try {
+			const started = performance.now();
+			const asked = await askModel(
+				deps,
+				state.iteration,
+				[
+					systemFor(state, rewriteInstruction(first.keys, first.claimed)),
+					...past,
+					...state.messages,
+					{
+						role: 'user',
+						content: fenced(
+							'last-answer',
+							first.sentences.map((text, i) => ({ sentence: i + 1, text }))
+						)
+					}
+				],
+				[],
+				spent,
+				input
+			);
+			words = withoutCallMarkup(asked.completion.content ?? '');
+			deps.log.info(
+				{
+					unfoundedKeys: first.keys.length,
+					claims: first.claimed.length,
+					durationMs: Math.round(performance.now() - started)
+				},
+				'answer rewritten'
+			);
+		} catch (err: unknown) {
+			if (!(err instanceof LlmError)) throw err;
+			deps.log.warn({ err }, 'answer not rewritten');
+			return {};
+		}
+		if (words.length === 0) return {};
+		const again = await groundCheck(state, grounding, words);
+		const ungrounded = again.keys.length > 0 || again.claimed.length > 0;
+		if (ungrounded) deps.log.info({}, 'answer still ungrounded');
+		return { answer: words, ungrounded };
+	}
+
 	// The message ran all the calls it may, or the turn spent all its tokens: rather than fail, the
 	// turn ends on the model's own account of what it did and what remains, which only the call that
 	// asks for it is told to give. Each limit reached is logged; the model is told of the tool calls
@@ -928,7 +1068,8 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 		// not for the owner, its words beside them are
 		const written = asked.completion.content ?? '';
 		let words = withoutCallMarkup(written);
-		if (words.length === 0) {
+		const said = words.length > 0;
+		if (!said) {
 			const reason =
 				written.trim().length > 0
 					? 'markup'
@@ -939,7 +1080,10 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 			words =
 				reached === 'markup' ? input.markupNotice(state.actions) : input.limitNotice(state.actions);
 		}
-		return { answer: words, ...(reached === 'markup' ? {} : { atLimit: true }) };
+		return {
+			answer: words,
+			...(reached === 'markup' ? (said ? { draft: words } : {}) : { atLimit: true })
+		};
 	}
 
 	// The answer as the owner reads it and as the conversation keeps it: the model's words, and
@@ -951,6 +1095,7 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 		if (undone.length > 0) deps.log.info({ undone: undone.length }, 'plan left undone');
 		const words = [
 			state.answer ?? '',
+			...(input.grounding !== undefined && state.ungrounded ? [input.grounding.notice] : []),
 			...(guard === undefined || done.length === 0
 				? []
 				: [
@@ -979,15 +1124,15 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 	type Thinker = (typeof THINKERS)[number];
 	const thinker = (state: TurnStep): Thinker | 'wrapUp' =>
 		spent.tokens >= deps.maxTurnTokens ? 'wrapUp' : (state.lane ?? 'model');
-	const afterAnswer = (state: TurnStep): 'tools' | 'verify' | 'wrapUp' | typeof END =>
+	const afterAnswer = (state: TurnStep): 'tools' | 'ground' | 'wrapUp' | typeof END =>
 		state.silent
 			? END
 			: state.cut || state.markup
 				? 'wrapUp'
 				: state.draft === null
 					? 'tools'
-					: 'verify';
-	const AFTER_ANSWER = ['tools', 'verify', 'wrapUp', END] as const;
+					: 'ground';
+	const AFTER_ANSWER = ['tools', 'ground', 'wrapUp', END] as const;
 
 	const graph = new StateGraph(TurnState)
 		.addNode('route', route)
@@ -998,6 +1143,7 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 		.addNode('act', act)
 		.addNode('unsure', unsure)
 		.addNode('tools', tools)
+		.addNode('ground', ground)
 		.addNode('verify', verify)
 		.addNode('wrapUp', wrapUp)
 		.addNode('report', report)
@@ -1026,11 +1172,12 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 			(state) => (state.answer !== null ? END : state.notRun > 0 ? 'wrapUp' : thinker(state)),
 			[...THINKERS, 'wrapUp', END]
 		)
+		.addEdge('ground', 'verify')
 		.addEdge('verify', 'report')
 		// The words asked for after a call written in the text are an answer like any other, and
 		// are checked as one; an account at a limit is the model's own, and is reported as it is
-		.addConditionalEdges('wrapUp', (state) => (state.markup ? 'verify' : 'report'), [
-			'verify',
+		.addConditionalEdges('wrapUp', (state) => (state.markup ? 'ground' : 'report'), [
+			'ground',
 			'report'
 		])
 		.addEdge('report', END)
@@ -1070,6 +1217,7 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 					)
 				: null,
 			unfounded: false,
+			ungrounded: false,
 			draft: null,
 			answer: null,
 			silent: false,

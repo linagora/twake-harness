@@ -104,6 +104,8 @@ export interface Messages {
 		stepsDone(steps: readonly string[]): string;
 		// Below an answer that said something was done, in a turn that did nothing in an application
 		readonly nothingDone: string;
+		// Below an answer whose details the data of the turn did not hold, even once written again
+		readonly ungrounded: string;
 		// The owner's permission for their assistant to act for them expires within days: on what
 		// date and at what time, and where to renew it. No question: nothing waits for an answer
 		delegationExpiring(date: string, time: string, link: string): string;
@@ -766,6 +768,8 @@ const ENGLISH: Messages = {
 			`Not done, of what I had planned:\n${steps.map((step) => `- ${step}`).join('\n')}`,
 		stepsDone: (steps) => `Done:\n${steps.map((step) => `- ${step}`).join('\n')}`,
 		nothingDone: 'Nothing was done in your applications for this message.',
+		ungrounded:
+			'Some details of this answer could not be found in your data: check them before relying on them.',
 		delegationExpiring: (date, time, link) =>
 			`The permission to act on your behalf that you gave me expires on ${date} at ${time}. Renew it before then so that I can keep acting for you: ${link}`
 	},
@@ -1214,6 +1218,8 @@ const FRENCH: Messages = {
 			`Pas fait, parmi ce que j'avais prévu :\n${steps.map((step) => `- ${step}`).join('\n')}`,
 		stepsDone: (steps) => `Fait :\n${steps.map((step) => `- ${step}`).join('\n')}`,
 		nothingDone: "Rien n'a été fait dans tes applications pour ce message.",
+		ungrounded:
+			"Je n'ai pas retrouvé certains détails de cette réponse dans tes données : vérifie-les avant de t'y fier.",
 		delegationExpiring: (date, time, link) =>
 			`L'autorisation d'agir en ton nom que tu m'as donnée expire le ${date} à ${time}. Renouvelle-la d'ici là pour que je continue à agir pour toi : ${link}`
 	},

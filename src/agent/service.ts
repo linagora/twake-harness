@@ -1039,7 +1039,20 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 						locale,
 						// A turn is held to a plan once a decision model tells what its message asks for; a
 						// turn a suggestion started goes by its own rules
-						...(config.llm.decisionModel.length > 0 && suggestion === null ? { guard } : {})
+						...(config.llm.decisionModel.length > 0 && suggestion === null ? { guard } : {}),
+						// The answer of a turn of its owner's is held to the data it was given, when the
+						// deployment turns that on
+						...(config.turn.grounding !== 'off' && suggestion === null
+							? {
+									grounding: {
+										mode: config.turn.grounding,
+										checkModel: config.llm.checkModel,
+										notice: messages.notices.ungrounded,
+										now: `${moment.words} (${moment.iso})`,
+										timeZone: moment.timeZone
+									}
+								}
+							: {})
 					}
 				);
 				// A turn that ended on the brief its owner asked for takes what the earlier briefs named

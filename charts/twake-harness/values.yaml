@@ -86,6 +86,14 @@ config:
   # it offers them once to have their assistant listen there; set it on each role: the matrix role
   # refuses to start without suggestionsEnabled
   chatMentionsEnabled: false
+  # Whether the answer of an owner's turn is held to the data the turn was given: off, measure or on.
+  # Measure checks it and logs what the check found, and sends the answer as the model wrote it. On
+  # also has the model write it again once, when a task key it never saw, or a sentence the check
+  # model (llmCheckModel) finds unsupported by what the turn read, is in it (see
+  # docs/architecture.md). Turn measure on first: both cost a call of the check model on each turn
+  # that read something
+  # Quote it: unquoted, YAML reads off and on as booleans
+  turnGrounding: 'off'
   # Twake Space's API, where a suggestion is posted to the notifications of its user; empty means
   # a suggestion reaches the assistant's room alone. Its token, a tws_ API token with the scope
   # notifications:write, goes in secretEnv as SPACE_API_TOKEN. The harness reaches the outside

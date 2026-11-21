@@ -20,6 +20,10 @@ _Avoid_: assistant (an owner's personal agent), agent
 A person of the owner's own organization, on the same mail domain.
 _Avoid_: contact, coworker
 
+**Grounding**:
+What an answer of an owner's turn cites must come from what the turn was given: its prompt, the owner's words and the results of its reads. A task key the turn never saw, or a fact of the owner's data the results do not hold, is ungrounded, and the assistant writes the answer again once.
+_Avoid_: fact-check, validation
+
 **Listening journal**:
 An owner's record of what their assistant saw and did for them each day, and what came of it, from an invitation received to an availability request answered.
 _Avoid_: activity log, history
