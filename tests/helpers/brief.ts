@@ -165,3 +165,40 @@ export function referencesIn(request: ChatRequest | undefined): unknown[] {
 			: []
 	);
 }
+
+// What a brief's model call asks the model, the data it is handed left out
+export function instructionOf(told: string): string {
+	return told.replace(FENCED, '');
+}
+
+// The tasks a brief's model call is handed, by the keys it names them by: those assigned to the
+// owner, then the unassigned ones of their projects (assigned_to_me false or null), each kind late
+// ones then those of the day, and whether more were left out
+export interface ToldTasks {
+	readonly assigned: { readonly overdue: string[]; readonly today: string[] };
+	readonly unassigned: { readonly overdue: string[]; readonly today: string[] };
+	readonly truncated: boolean;
+}
+export function toldTasks(told: string): ToldTasks {
+	interface Told {
+		readonly key: string;
+		readonly assigned_to_me: boolean | null;
+	}
+	const { tasks } = dataOf(told) as {
+		tasks: { overdue: Told[]; today: Told[]; truncated: boolean };
+	};
+	const keys = (list: Told[], mine: boolean): string[] =>
+		list.filter((task) => (task.assigned_to_me === true) === mine).map((task) => task.key);
+	return {
+		assigned: { overdue: keys(tasks.overdue, true), today: keys(tasks.today, true) },
+		unassigned: { overdue: keys(tasks.overdue, false), today: keys(tasks.today, false) },
+		truncated: tasks.truncated
+	};
+}
+
+// The tasks the references of briefs name, each by its key and ids, in the order of their keys
+export function referencedTasks(references: unknown[]): unknown[] {
+	return references
+		.flatMap((reference) => (reference as { tasks?: { key: string }[] }).tasks ?? [])
+		.sort((a, b) => a.key.localeCompare(b.key));
+}

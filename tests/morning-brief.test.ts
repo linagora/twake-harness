@@ -12,14 +12,17 @@ import {
 	BRIEF_CATALOG,
 	dataOf,
 	emailOf,
+	instructionOf,
 	INBOX,
 	LIST_EMAILS,
 	LIST_EVENTS,
 	LIST_MAILBOXES,
 	LIST_TASKS,
 	MAILBOXES,
+	referencedTasks,
 	referencesIn,
-	seenEveryDay
+	seenEveryDay,
+	toldTasks
 } from './helpers/brief.js';
 import { makeSettableClock } from './helpers/clock.js';
 import { startConsentRoom, type ConsentRoom } from './helpers/consent-room.js';
@@ -232,6 +235,89 @@ function tasksIn(list: Record<string, unknown>): Record<string, unknown>[] {
 	return list['tasks'] as Record<string, unknown>[];
 }
 
+// A task of one of her own projects that her tasks' contract lists among hers though it is not
+// assigned to her: assigned to nobody, or, as the contract may also answer, without saying whether
+// to her
+function unassignedTask(n: number, due: string, assigned: false | null): Record<string, unknown> {
+	return {
+		board_id: 'board-sample',
+		task_id: `task-sample-${n}`,
+		key: `DEMO-${n}`,
+		parent_id: null,
+		section_id: null,
+		state: 'open',
+		priority: null,
+		due_date: due,
+		due_time: null,
+		due_zone: null,
+		deadline: null,
+		assignees: assigned === null ? ['dan@test.local'] : [],
+		assigned_to_me: assigned,
+		untrusted: { title: `Exemple ${n}`, board_name: 'Projet exemple', labels: [] }
+	};
+}
+
+// A task assigned to her, numbered, due on the date given
+function assignedTask(n: number, key: string, due: string): Record<string, unknown> {
+	return {
+		...tasksIn(tasksOf('overdue', due))[0],
+		task_id: `task-${key}`,
+		key,
+		due_date: due,
+		untrusted: { title: `Tâche ${n}`, board_name: 'Site web', labels: [] }
+	};
+}
+
+// What her tasks' contract answers when it holds these tasks: as many as the limit asked for, and
+// whether it had more
+function upTo(tasks: Record<string, unknown>[], limit: number): Record<string, unknown> {
+	return { tasks: tasks.slice(0, limit), truncated: tasks.length > limit };
+}
+
+// Her tasks of tasksOf, the demo late and the report of the day, among three unassigned tasks of
+// her projects, two late, left to nobody or not said to be hers, and one of the day: five tasks in
+// all, which her tasks' contract lists whole
+function fewOfEachKind(due: string, today: string): Record<string, unknown> {
+	const mine = tasksIn(tasksOf(due, today));
+	return {
+		tasks:
+			due === 'overdue'
+				? [
+						unassignedTask(1, plusDays(today, -2), false),
+						...mine,
+						unassignedTask(2, plusDays(today, -1), null)
+					]
+				: [unassignedTask(3, today, false), ...mine],
+		truncated: false
+	};
+}
+
+// Twenty-five unassigned tasks of her projects late, listed before her late demo, then three
+// unassigned tasks of the day before ten of hers: thirty-nine tasks, more than a brief shows, which
+// her tasks' contract lists whole
+function crowdOfUnassigned(due: string, today: string): Record<string, unknown> {
+	return {
+		tasks:
+			due === 'overdue'
+				? [
+						...Array.from({ length: 25 }, (_, i) =>
+							unassignedTask(i + 1, plusDays(today, -1), i % 2 === 0 ? false : null)
+						),
+						...tasksIn(tasksOf(due, today))
+					]
+				: [
+						...Array.from({ length: 3 }, (_, i) => unassignedTask(i + 26, today, false)),
+						...Array.from({ length: 10 }, (_, i) => assignedTask(i + 1, `OPS-${i + 1}`, today))
+					],
+		truncated: false
+	};
+}
+
+// The headings of her tasks the harness lays out: those assigned to her, then the unassigned ones
+// of her projects
+const ASSIGNED_HEADING = 'Les tâches assignées à toi, en retard et du jour :';
+const UNASSIGNED_HEADING = 'Les tâches sans assigné de tes projets, en retard et du jour :';
+
 // What her inbox holds unread: a mail from Bob, who organizes her stand-up, that asks her for the
 // quarter's figures, and a newsletter, sent in bulk
 const BOB_ASKS = emailOf({
@@ -261,15 +347,23 @@ function answering(
 	answers: {
 		readonly day?: (date: string) => Record<string, unknown>;
 		readonly pending?: (date: string) => Record<string, unknown>;
-		readonly tasks?: (due: string, today: string) => Record<string, unknown>;
+		readonly tasks?: (due: string, today: string, limit: number) => Record<string, unknown>;
 		readonly mails?: readonly Record<string, unknown>[];
 	} = {}
 ): (call: ContractCall) => ContractReply {
-	const { day = (date) => dayOf(date), pending = pendingOf, tasks = tasksOf, mails = [] } = answers;
+	const {
+		day = (date) => dayOf(date),
+		pending = pendingOf,
+		tasks = (due: string, today: string) => tasksOf(due, today),
+		mails = []
+	} = answers;
 	return (call) => {
 		if (call.path === LIST_TASKS) {
 			const today = dateIn(clock.now(), String(call.query['zone']));
-			return { status: 200, body: tasks(String(call.query['due']), today) };
+			return {
+				status: 200,
+				body: tasks(String(call.query['due']), today, Number(call.query['limit']))
+			};
 		}
 		if (call.path === LIST_MAILBOXES) return { status: 200, body: MAILBOXES };
 		if (call.path === LIST_EMAILS)
@@ -434,8 +528,8 @@ describe('every working day at eight, the brief of my meetings arrives in my roo
 				LIST_EMAILS,
 				{ mailbox: INBOX, unread: 'true', after: '2026-10-09T08:00:00+02:00', limit: '50' }
 			],
-			['GET', LIST_TASKS, { zone: 'Europe/Paris', due: 'overdue', limit: '30' }],
-			['GET', LIST_TASKS, { zone: 'Europe/Paris', due: 'today', limit: '30' }]
+			['GET', LIST_TASKS, { zone: 'Europe/Paris', due: 'overdue', limit: '100' }],
+			['GET', LIST_TASKS, { zone: 'Europe/Paris', due: 'today', limit: '100' }]
 		]);
 		for (const call of read) {
 			expect(call.headers['x-twake-on-behalf-of']).toBe(ALICE);
@@ -636,7 +730,7 @@ describe('every working day at eight, the brief of my meetings arrives in my roo
 				'2. Point quotidien : série à partir du jeudi 22 octobre, 08:30–08:45, de bob@test.local',
 				'3. Séminaire : dimanche 25 octobre, toute la journée, de carol@test.local',
 				'',
-				'Tes tâches en retard et du jour :',
+				ASSIGNED_HEADING,
 				`- WEB-12 ${hostileTask} : en retard, prévue le dimanche 18 octobre`,
 				"- OPS-3 Envoyer le compte rendu : pour aujourd'hui, 17:00",
 				'',
@@ -735,7 +829,7 @@ describe('every working day at eight, the brief of my meetings arrives in my roo
 				'5. Invitation 5 : vendredi 13 novembre, 15:00–15:30, de bob@test.local',
 				'+ 2 autres',
 				'',
-				'Tes tâches en retard et du jour :',
+				ASSIGNED_HEADING,
 				'- WEB-1 Tâche 1 : en retard, prévue le dimanche 8 novembre',
 				'- WEB-2 Tâche 2 : en retard, prévue le samedi 7 novembre',
 				'- WEB-3 Tâche 3 : en retard, prévue le vendredi 6 novembre',
@@ -772,7 +866,7 @@ describe('every working day at eight, the brief of my meetings arrives in my roo
 			[
 				"Tu n'as aucune réunion aujourd'hui, mardi 10 novembre 2026.",
 				'',
-				'Tes tâches en retard et du jour :',
+				ASSIGNED_HEADING,
 				"- OPS-3 Envoyer le compte rendu : pour aujourd'hui, 17:00",
 				'',
 				'Pour enchaîner, dis-moi par exemple « reporte OPS-3 à demain ».'
@@ -1148,6 +1242,256 @@ describe('every working day at eight, the brief of my meetings arrives in my roo
 					message.role === 'user' && String(message.content).includes('(id brief-2026-11-04-')
 			)
 		).toBe(true);
+	});
+
+	// The day of a brief with neither meeting nor invitation, so that its tasks alone show
+	const nothing = (): Record<string, unknown> => ({
+		time_zone: 'Europe/Paris',
+		events: [],
+		truncated: false
+	});
+
+	// The model fails the brief, which the harness then lays out itself
+	function failTheModel(): void {
+		r.h.apisix.llm.script = (request) =>
+			lastUser(request).startsWith('[brief]')
+				? { failWith: 502 }
+				: { content: `echo: ${lastUser(request)}` };
+	}
+
+	it('hands the model the tasks assigned to me and, apart, the unassigned tasks of my projects my tasks’ contract lists with them, and tells it to present them apart', async () => {
+		const seen = briefs().length;
+		const calls = briefCalls().length;
+		r.h.apisix.contracts.handler = answering(clock, {
+			tasks: (due, today, limit) => upTo(tasksIn(fewOfEachKind(due, today)), limit)
+		});
+		// Friday 23 October at eight in Paris
+		await pass('2026-10-23T06:00:00Z');
+		await nextBrief(seen);
+		const told = lastUser(briefCalls().slice(calls).at(0));
+		// Her late demo and her report of the day, then the two late tasks and the one of the day
+		// nobody is assigned to in her projects, each kind told apart
+		expect.soft(toldTasks(told)).toEqual({
+			assigned: { overdue: ['WEB-12'], today: ['OPS-3'] },
+			unassigned: { overdue: ['DEMO-1', 'DEMO-2'], today: ['DEMO-3'] },
+			truncated: false
+		});
+		// The model is told what tells them apart, beyond the data it is handed
+		expect.soft(instructionOf(told)).toContain('assigned_to_me');
+		// The brief's line counts all five, and the unassigned ones among them
+		expect
+			.soft(logged('brief written').at(-1))
+			.toMatchObject({ by: 'model', tasks: 5, unassigned_tasks: 3 });
+		// Her next turn reads the ids of both kinds
+		const turns = r.h.apisix.llm.calls.length;
+		await r.client.sendText(r.room, 'Reporte DEMO-1 à demain');
+		await r.nextSaying('echo: Reporte DEMO-1 à demain', 0);
+		expect(referencedTasks(referencesIn(r.h.apisix.llm.calls.slice(turns).at(0)?.request))).toEqual(
+			[
+				{ key: 'DEMO-1', board_id: 'board-sample', task_id: 'task-sample-1' },
+				{ key: 'DEMO-2', board_id: 'board-sample', task_id: 'task-sample-2' },
+				{ key: 'DEMO-3', board_id: 'board-sample', task_id: 'task-sample-3' },
+				{ key: 'OPS-3', board_id: 'board-ops', task_id: 'task-report' },
+				{ key: 'WEB-12', board_id: 'board-web', task_id: 'task-demo' }
+			]
+		);
+	});
+
+	it('lays out, when the model fails, the tasks assigned to me, then, under their own heading, the unassigned tasks of my projects', async () => {
+		const seen = briefs().length;
+		failTheModel();
+		r.h.apisix.contracts.handler = answering(clock, {
+			day: nothing,
+			pending: nothing,
+			tasks: (due, today, limit) => upTo(tasksIn(fewOfEachKind(due, today)), limit)
+		});
+		// Thursday 19 November at eight in Paris, in winter time
+		await pass('2026-11-19T07:00:00Z');
+		const brief = await nextBrief(seen);
+		expect
+			.soft(brief.body)
+			.toBe(
+				[
+					"Tu n'as aucune réunion aujourd'hui, jeudi 19 novembre 2026.",
+					'',
+					ASSIGNED_HEADING,
+					'- WEB-12 Préparer la démo : en retard, prévue le lundi 16 novembre',
+					"- OPS-3 Envoyer le compte rendu : pour aujourd'hui, 17:00",
+					'',
+					UNASSIGNED_HEADING,
+					'- DEMO-1 Exemple 1 : en retard, prévue le mardi 17 novembre',
+					'- DEMO-2 Exemple 2 : en retard, prévue le mercredi 18 novembre',
+					"- DEMO-3 Exemple 3 : pour aujourd'hui",
+					'',
+					'Pour enchaîner, dis-moi par exemple « reporte WEB-12 à demain ».'
+				].join('\n')
+			);
+		expect(logged('brief written').at(-1)).toMatchObject({
+			by: 'template',
+			tasks: 5,
+			unassigned_tasks: 3
+		});
+	});
+
+	it('tells the unassigned tasks of my projects as such when none is assigned to me', async () => {
+		const seen = briefs().length;
+		const calls = briefCalls().length;
+		failTheModel();
+		r.h.apisix.contracts.handler = answering(clock, {
+			day: nothing,
+			pending: nothing,
+			tasks: (due, today, limit) =>
+				upTo(
+					due === 'overdue'
+						? [
+								unassignedTask(1, plusDays(today, -2), false),
+								unassignedTask(2, plusDays(today, -1), null)
+							]
+						: [unassignedTask(3, today, false), unassignedTask(4, today, null)],
+					limit
+				)
+		});
+		// Monday 16 November at eight in Paris
+		await pass('2026-11-16T07:00:00Z');
+		const brief = await nextBrief(seen);
+		expect.soft(toldTasks(lastUser(briefCalls().slice(calls).at(0)))).toEqual({
+			assigned: { overdue: [], today: [] },
+			unassigned: { overdue: ['DEMO-1', 'DEMO-2'], today: ['DEMO-3', 'DEMO-4'] },
+			truncated: false
+		});
+		expect
+			.soft(brief.body)
+			.toBe(
+				[
+					"Tu n'as aucune réunion aujourd'hui, lundi 16 novembre 2026.",
+					'',
+					UNASSIGNED_HEADING,
+					'- DEMO-1 Exemple 1 : en retard, prévue le samedi 14 novembre',
+					'- DEMO-2 Exemple 2 : en retard, prévue le dimanche 15 novembre',
+					"- DEMO-3 Exemple 3 : pour aujourd'hui",
+					"- DEMO-4 Exemple 4 : pour aujourd'hui",
+					'',
+					'Pour enchaîner, dis-moi par exemple « reporte DEMO-1 à demain ».'
+				].join('\n')
+			);
+		expect(logged('brief written').at(-1)).toMatchObject({
+			by: 'template',
+			tasks: 4,
+			unassigned_tasks: 4
+		});
+	});
+
+	it('hands the model the tasks assigned to me first, then the unassigned tasks of my projects, thirty at most together, late ones first within each kind, and says there are more', async () => {
+		const seen = briefs().length;
+		const calls = briefCalls().length;
+		r.h.apisix.contracts.handler = answering(clock, {
+			tasks: (due, today, limit) => upTo(tasksIn(crowdOfUnassigned(due, today)), limit)
+		});
+		// Tuesday 17 November at eight in Paris
+		await pass('2026-11-17T07:00:00Z');
+		await nextBrief(seen);
+		// Her late demo and her ten tasks of the day, then nineteen of the twenty-five unassigned
+		// late ones, though these came first in the read, and none of the unassigned ones of the day
+		expect.soft(toldTasks(lastUser(briefCalls().slice(calls).at(0)))).toEqual({
+			assigned: {
+				overdue: ['WEB-12'],
+				today: Array.from({ length: 10 }, (_, i) => `OPS-${i + 1}`)
+			},
+			unassigned: { overdue: Array.from({ length: 19 }, (_, i) => `DEMO-${i + 1}`), today: [] },
+			truncated: true
+		});
+		expect(logged('brief written').at(-1)).toMatchObject({
+			by: 'model',
+			tasks: 30,
+			unassigned_tasks: 19
+		});
+	});
+
+	it('hands the model thirty of the tasks assigned to me at most, late ones first, before any unassigned task of my projects, and says there are more', async () => {
+		const seen = briefs().length;
+		const calls = briefCalls().length;
+		// Twenty-five of her tasks late, the first ten each after an unassigned one, then ten of hers
+		// of the day after five unassigned ones: thirty-five of hers, Tasks having listed them whole
+		r.h.apisix.contracts.handler = answering(clock, {
+			tasks: (due, today, limit) =>
+				upTo(
+					due === 'overdue'
+						? Array.from({ length: 25 }, (_, i) => {
+								const mine = assignedTask(i + 1, `WEB-${i + 1}`, plusDays(today, -(i + 1)));
+								return i < 10
+									? [unassignedTask(i + 1, plusDays(today, -(i + 1)), false), mine]
+									: [mine];
+							}).flat()
+						: [
+								...Array.from({ length: 5 }, (_, i) => unassignedTask(i + 11, today, null)),
+								...Array.from({ length: 10 }, (_, i) => assignedTask(i + 26, `OPS-${i + 1}`, today))
+							],
+					limit
+				)
+		});
+		// Friday 20 November at eight in Paris
+		await pass('2026-11-20T07:00:00Z');
+		await nextBrief(seen);
+		expect.soft(toldTasks(lastUser(briefCalls().slice(calls).at(0)))).toEqual({
+			assigned: {
+				overdue: Array.from({ length: 25 }, (_, i) => `WEB-${i + 1}`),
+				today: ['OPS-1', 'OPS-2', 'OPS-3', 'OPS-4', 'OPS-5']
+			},
+			unassigned: { overdue: [], today: [] },
+			truncated: true
+		});
+		expect(logged('brief written').at(-1)).toMatchObject({
+			by: 'model',
+			tasks: 30,
+			unassigned_tasks: 0
+		});
+	});
+
+	it('lays out, when the model fails with more tasks than a brief shows, each kind under its own heading, mine first, each saying there are more', async () => {
+		const seen = briefs().length;
+		failTheModel();
+		r.h.apisix.contracts.handler = answering(clock, {
+			day: nothing,
+			pending: nothing,
+			tasks: (due, today, limit) => upTo(tasksIn(crowdOfUnassigned(due, today)), limit)
+		});
+		// Wednesday 18 November at eight in Paris
+		await pass('2026-11-18T07:00:00Z');
+		const brief = await nextBrief(seen);
+		const blocks = brief.body.split('\n\n');
+		const assigned = blocks.findIndex((block) => block.startsWith(ASSIGNED_HEADING));
+		const unassigned = blocks.findIndex((block) => block.startsWith(UNASSIGNED_HEADING));
+		expect.soft(assigned).toBeGreaterThan(0);
+		expect.soft(unassigned).toBe(assigned + 1);
+		expect
+			.soft(blocks[assigned]?.split('\n'))
+			.toEqual([
+				ASSIGNED_HEADING,
+				'- WEB-12 Préparer la démo : en retard, prévue le dimanche 15 novembre',
+				"- OPS-1 Tâche 1 : pour aujourd'hui",
+				"- OPS-2 Tâche 2 : pour aujourd'hui",
+				"- OPS-3 Tâche 3 : pour aujourd'hui",
+				"- OPS-4 Tâche 4 : pour aujourd'hui",
+				expect.stringMatching(/^\+ /)
+			]);
+		expect
+			.soft(blocks[unassigned]?.split('\n'))
+			.toEqual([
+				UNASSIGNED_HEADING,
+				...Array.from(
+					{ length: 5 },
+					(_, i) => `- DEMO-${i + 1} Exemple ${i + 1} : en retard, prévue le mardi 17 novembre`
+				),
+				expect.stringMatching(/^\+ /)
+			]);
+		expect
+			.soft(blocks.at(-1))
+			.toBe('Pour enchaîner, dis-moi par exemple « reporte WEB-12 à demain ».');
+		expect(logged('brief written').at(-1)).toMatchObject({
+			by: 'template',
+			tasks: 30,
+			unassigned_tasks: 19
+		});
 	});
 
 	it('follows the zone of my calendar once a read of it named one, my tasks’ days included', async () => {

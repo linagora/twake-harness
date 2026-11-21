@@ -148,6 +148,9 @@ const LIST_EMAILS = 'list_emails';
 // most tasks the model is handed, late ones first
 const LIST_TASKS = 'list_my_tasks';
 const MAX_TASKS = 30;
+// The most the contract lists in one read: the unassigned tasks of the owner's projects come with
+// theirs, so the brief asks for all it can before choosing the thirty it keeps
+const TASKS_READ_LIMIT = 100;
 
 // Drive's operation the brief reads the shares other people gave the owner with
 const LIST_SHARES = 'list_received_shares';
@@ -277,11 +280,13 @@ type Task = z.infer<typeof taskSchema>;
 const taskListSchema = z.object({ tasks: z.array(taskSchema), truncated: z.boolean() });
 
 // The owner's open tasks due before the day of the brief, then those due that day, thirty at most
-// together, and whether Tasks had more
+// together: those assigned to them first, then the unassigned ones of their projects, late ones
+// first within each kind; whether Tasks had more, and which kind has some left out
 interface Tasks {
 	readonly overdue: readonly Task[];
 	readonly today: readonly Task[];
 	readonly truncated: boolean;
+	readonly left_out: { readonly assigned: boolean; readonly unassigned: boolean };
 }
 
 // What the brief tells, section by section, as its reads gave it
@@ -655,22 +660,51 @@ function template(
 	}
 	if (!tasks.ok) notRead('tasks');
 	else {
-		const { overdue, today, truncated } = tasks.value;
-		const first = overdue[0] ?? today[0];
-		if (first !== undefined) {
-			const lines = [
-				...overdue.map((task) =>
-					words.late(
-						task.key,
-						task.untrusted.title,
-						task.due_date === null ? null : dayWords(task.due_date, locale)
-					)
-				),
-				...today.map((task) => words.dueToday(task.key, task.untrusted.title, task.due_time))
-			];
-			laid.push(section(words.tasks, lines, moreOf(lines.length, truncated, words.more), false));
-			examples.push(words.postpone(first.key));
+		const { overdue, today, left_out: leftOut } = tasks.value;
+		const linesOf = (mine: boolean): { keys: string[]; lines: string[] } => {
+			const of = (list: readonly Task[]) =>
+				list.filter((task) => (task.assigned_to_me === true) === mine);
+			const late = of(overdue);
+			const due = of(today);
+			return {
+				keys: [...late, ...due].map(({ key }) => key),
+				lines: [
+					...late.map((task) =>
+						words.late(
+							task.key,
+							task.untrusted.title,
+							task.due_date === null ? null : dayWords(task.due_date, locale)
+						)
+					),
+					...due.map((task) => words.dueToday(task.key, task.untrusted.title, task.due_time))
+				]
+			};
+		};
+		const assigned = linesOf(true);
+		const unassigned = linesOf(false);
+		if (assigned.lines.length > 0) {
+			laid.push(
+				section(
+					words.tasks,
+					assigned.lines,
+					moreOf(assigned.lines.length, leftOut.assigned, words.more),
+					false
+				)
+			);
 		}
+		// Thirty assigned tasks may have left out every unassigned one: their heading still says there are more
+		if (unassigned.lines.length > 0 || (assigned.keys.length >= MAX_TASKS && leftOut.unassigned)) {
+			laid.push(
+				section(
+					words.unassignedTasks,
+					unassigned.lines,
+					moreOf(unassigned.lines.length, leftOut.unassigned, words.more),
+					false
+				)
+			);
+		}
+		const first = assigned.keys[0] ?? unassigned.keys[0];
+		if (first !== undefined) examples.push(words.postpone(first));
 	}
 	if (untold.activities.length > 0) {
 		const lines = untold.activities.map(({ activity, meeting, task }) =>
@@ -892,6 +926,12 @@ function withdrawnOf(sections: Sections): BriefDomain[] {
 	return BRIEF_DOMAINS.filter((domain) => skipped.some(([name]) => DOMAINS[name] === domain));
 }
 
+// The tasks as the model is handed them: the tasks alone, which kind has some left out being the
+// harness's own
+function tasksData({ left_out: _, ...tasks }: Tasks): Omit<Tasks, 'left_out'> {
+	return tasks;
+}
+
 // What the model is handed of the brief's reads: each section read, what arrived since the owner's
 // last brief that their assistant told them nothing of, when anything did, and why each other one
 // was not, but those the owner took back, which the harness tells them of itself, and those of an
@@ -900,7 +940,7 @@ function dataOf(date: string, { sections, untold, timeZone }: Reads): Record<str
 	const data: Record<string, unknown> = { date };
 	const notRead: Record<string, string> = {};
 	for (const [name, read] of readsOf(sections)) {
-		if (read.ok) data[name] = read.value;
+		if (read.ok) data[name] = name === 'tasks' ? tasksData(read.value as Tasks) : read.value;
 		else if (!unsaid(read)) notRead[name] = read.reason;
 	}
 	if (untold.activities.length > 0) data['since_last_brief'] = untoldData(untold, timeZone);
@@ -994,32 +1034,46 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 	}
 
 	// The owner's late tasks, then those of the day, the day being the one it is in the zone given:
-	// left out together when either read is
+	// those assigned to them first, then the unassigned ones of their projects the contract lists
+	// with them, thirty together at most, late ones first within each kind; left out together when
+	// either read is
+	// ponytail: with more than a hundred tasks due, those past the hundredth are not seen
 	async function readTasks(context: ToolContext, zone: string): Promise<Read<Tasks>> {
 		const overdue = await read(
 			context,
 			LIST_TASKS,
-			{ zone, due: 'overdue', limit: MAX_TASKS },
+			{ zone, due: 'overdue', limit: TASKS_READ_LIMIT },
 			taskListSchema
 		);
 		if (!overdue.ok) return overdue;
 		const today = await read(
 			context,
 			LIST_TASKS,
-			{ zone, due: 'today', limit: MAX_TASKS },
+			{ zone, due: 'today', limit: TASKS_READ_LIMIT },
 			taskListSchema
 		);
 		if (!today.ok) return today;
-		const late = overdue.value.tasks.slice(0, MAX_TASKS);
+		const kind = (mine: boolean) => {
+			const of = (list: { tasks: Task[] }) =>
+				list.tasks.filter((task) => (task.assigned_to_me === true) === mine);
+			return [...of(overdue.value), ...of(today.value)];
+		};
+		const assigned = kind(true).slice(0, MAX_TASKS);
+		const allUnassigned = kind(false);
+		const unassigned = allUnassigned.slice(0, MAX_TASKS - assigned.length);
+		const contractCut = overdue.value.truncated || today.value.truncated;
+		const handed = new Set([...assigned, ...unassigned]);
+		const leftOut = {
+			assigned: contractCut || kind(true).length > assigned.length,
+			unassigned: contractCut || allUnassigned.length > unassigned.length
+		};
 		return {
 			ok: true,
 			value: {
-				overdue: late,
-				today: today.value.tasks.slice(0, MAX_TASKS - late.length),
-				truncated:
-					overdue.value.truncated ||
-					today.value.truncated ||
-					overdue.value.tasks.length + today.value.tasks.length > MAX_TASKS
+				overdue: overdue.value.tasks.filter((task) => handed.has(task)),
+				today: today.value.tasks.filter((task) => handed.has(task)),
+				truncated: leftOut.assigned || leftOut.unassigned,
+				left_out: leftOut
 			}
 		};
 	}
@@ -1385,6 +1439,11 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 				mails: sections.mails.ok ? sections.mails.value.unread.length : null,
 				tasks: sections.tasks.ok
 					? sections.tasks.value.overdue.length + sections.tasks.value.today.length
+					: null,
+				unassigned_tasks: sections.tasks.ok
+					? [...sections.tasks.value.overdue, ...sections.tasks.value.today].filter(
+							(task) => task.assigned_to_me !== true
+						).length
 					: null,
 				activities: untold.activities.length,
 				replies: untold.replies.length,

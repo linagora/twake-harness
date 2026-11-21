@@ -10,13 +10,16 @@ import {
 	BRIEF_CATALOG,
 	dataOf,
 	emailOf,
+	instructionOf,
 	LIST_EMAILS,
 	LIST_EVENTS,
 	LIST_MAILBOXES,
 	LIST_TASKS,
 	MAILBOXES,
+	referencedTasks,
 	referencesIn,
 	seenEveryDay,
+	toldTasks,
 	type Mail
 } from './helpers/brief.js';
 import { makeSettableClock } from './helpers/clock.js';
@@ -104,6 +107,27 @@ function referencesOf(request: ChatRequest | undefined): unknown[] {
 	return [...referencesIn(request), ...posted];
 }
 
+// One of her open tasks as her tasks' contract lists it, due on the date given: assigned to her
+// (true), to nobody (false), or without saying whether to her (null)
+function taskOf(key: string, due: string, assigned: boolean | null): Record<string, unknown> {
+	return {
+		board_id: `board-${key}`,
+		task_id: `task-${key}`,
+		key,
+		parent_id: null,
+		section_id: null,
+		state: 'open',
+		priority: null,
+		due_date: due,
+		due_time: null,
+		due_zone: null,
+		deadline: null,
+		assignees: assigned === true ? [ALICE] : assigned === null ? ['dan@test.local'] : [],
+		assigned_to_me: assigned,
+		untrusted: { title: `Tâche ${key}`, board_name: 'Projet', labels: [] }
+	};
+}
+
 function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -114,6 +138,8 @@ describe('I ask for my brief whenever I want it, and it is the answer of my turn
 	const clock = makeSettableClock('2026-11-02T06:00:00Z');
 	// The unread emails of her inbox
 	let inbox: Mail[] = [];
+	// Her open tasks, as her tasks' contract lists them by when they are due
+	let tasks: Partial<Record<string, Record<string, unknown>[]>> = {};
 
 	// Everything Alice's client received from her assistant in her room, oldest first
 	const said = (): DecryptedMessage[] =>
@@ -206,12 +232,16 @@ describe('I ask for my brief whenever I want it, and it is the answer of my turn
 		r.h.apisix.contracts.spec = BRIEF_CATALOG;
 		for (const app of r.h.apps) expect(await app.agent.contracts.load()).toBeGreaterThan(0);
 		// Her day, no invitation waiting for her answer, the unread emails a test puts in her inbox, and
-		// no task
+		// the tasks a test gives her
 		r.h.apisix.contracts.handler = (call) => {
 			if (call.path === LIST_MAILBOXES) return { status: 200, body: MAILBOXES };
 			if (call.path === LIST_EMAILS)
 				return { status: 200, body: { emails: inbox.map(emailOf), next_cursor: null } };
-			if (call.path === LIST_TASKS) return { status: 200, body: { tasks: [], truncated: false } };
+			if (call.path === LIST_TASKS)
+				return {
+					status: 200,
+					body: { tasks: tasks[String(call.query['due'])] ?? [], truncated: false }
+				};
 			if (call.path !== LIST_EVENTS) return { status: 404, body: {} };
 			return {
 				status: 200,
@@ -228,6 +258,7 @@ describe('I ask for my brief whenever I want it, and it is the answer of my turn
 	// inbox empty
 	beforeEach(async () => {
 		inbox = [];
+		tasks = {};
 		await seenEveryDay(r.h.db, ALICE);
 		await allowBriefReads(r.h.db, ALICE);
 		await hold(false, null);
@@ -416,5 +447,49 @@ describe('I ask for my brief whenever I want it, and it is the answer of my turn
 		await r.client.sendText(r.room, 'Merci');
 		await nextSaid(seen + 4);
 		expect(referencesOf(r.h.apisix.llm.calls.slice(turns).at(0)?.request)).toEqual([]);
+	});
+
+	it('tells me, asked for, the tasks assigned to me and, apart, the unassigned tasks of my projects my tasks’ contract lists with them', async () => {
+		const seen = said().length;
+		const briefs = briefCalls().length;
+		tasks = {
+			overdue: [
+				taskOf('DEMO-1', '2026-11-10', false),
+				taskOf('WEB-7', '2026-11-11', true),
+				taskOf('DEMO-2', '2026-11-12', null)
+			],
+			today: [taskOf('DEMO-3', '2026-11-13', false), taskOf('OPS-4', '2026-11-13', true)]
+		};
+		// Friday 13 November at seven
+		await ask('2026-11-13T06:00:00Z', seen);
+		const told = lastUser(briefCalls().slice(briefs).at(0));
+		expect.soft(toldTasks(told)).toEqual({
+			assigned: { overdue: ['WEB-7'], today: ['OPS-4'] },
+			unassigned: { overdue: ['DEMO-1', 'DEMO-2'], today: ['DEMO-3'] },
+			truncated: false
+		});
+		// The model is told what tells them apart, beyond the data it is handed
+		expect.soft(instructionOf(told)).toContain('assigned_to_me');
+		expect
+			.soft(
+				r.h
+					.logLines()
+					.filter((line) => line['msg'] === 'brief written')
+					.at(-1)
+			)
+			.toMatchObject({ tasks: 5, unassigned_tasks: 3 });
+		// Her next turn reads the ids of both kinds
+		const turns = r.h.apisix.llm.calls.length;
+		await r.client.sendText(r.room, 'Merci');
+		await nextSaid(seen + 1);
+		expect(referencedTasks(referencesOf(r.h.apisix.llm.calls.slice(turns).at(0)?.request))).toEqual(
+			[
+				{ key: 'DEMO-1', board_id: 'board-DEMO-1', task_id: 'task-DEMO-1' },
+				{ key: 'DEMO-2', board_id: 'board-DEMO-2', task_id: 'task-DEMO-2' },
+				{ key: 'DEMO-3', board_id: 'board-DEMO-3', task_id: 'task-DEMO-3' },
+				{ key: 'OPS-4', board_id: 'board-OPS-4', task_id: 'task-OPS-4' },
+				{ key: 'WEB-7', board_id: 'board-WEB-7', task_id: 'task-WEB-7' }
+			]
+		);
 	});
 });
